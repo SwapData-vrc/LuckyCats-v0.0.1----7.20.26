@@ -26,8 +26,10 @@ replaced by stubs. So it answers:
 - are the touch targets reachable
 - does a route go where it was meant to go, in the right order
 - does the trail, recorder and telemetry logic behave
+- where a routine in src/autons.cpp actually goes -- press F1 and it runs, and
+  the Live view traces the path it took
 - does a Goal get approached back-first, which is what front-to-back scoring
-  needs and what the step list cannot show you
+  needs and what reading the code will not tell you
 
 It cannot answer anything about the physical robot. Motion here is
 constant-rate with no PID, no boomerang and no slew, because a made-up plant
@@ -47,6 +49,9 @@ hardware-only.** A route that looks perfect here can still drive badly.
 | F2 | run `opcontrol()` |
 | W / S | left stick, during opcontrol |
 | Up / Down | right stick, during opcontrol |
+| Q / E | L1 / L2 -- lift up / down |
+| R / F | R1 / R2 -- intake in / out |
+| X / B | claw open / closed |
 | Space | controller button A -- toggles route recording |
 | Esc | quit |
 

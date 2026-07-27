@@ -132,13 +132,42 @@ volatile uint32_t g_log_shown = 0; // head as of the last console repaint
 // ---------------------------------------------------------------------------
 // Route steps
 //
-// Kind, Step and the builders live in include/autons.hpp, because src/autons.cpp
-// is written against them and this file is not meant to be edited to add a
-// route. Everything here reads that vocabulary; nothing here defines it.
+// These belong to the on-brain route builder -- the Design view and the driving
+// recorder -- and to nothing else. Routines in AUTONS are compiled C++ and know
+// nothing about any of this.
+//
+// It is deliberately private to this file. An earlier version exposed it as a
+// vocabulary for writing routines in, which meant learning a second way to say
+// moveToPoint that could only express what the preview happened to support.
 // ---------------------------------------------------------------------------
 
-/// Cap on the hand-built route only. Routes in AUTONS are plain arrays and can
-/// be any length.
+enum class Kind : uint8_t {
+  DRIVE,  // a = inches along current heading, negative reverses
+  TURN,   // a = absolute heading, degrees
+  GOTO,   // a,b = field point in inches; flag bit 0 = swerve
+  INTAKE, // a = +1 in, -1 out, 0 stop
+  CLAW,   // a = 1 close/grip, 0 open/release
+  LIFT,   // a = 0..1 target height
+  WAIT,   // a = milliseconds
+  SCORE,  // a = lift height 0..1; raise, eject off the back, return to travel
+};
+
+/// GOTO modifier: without it the robot turns to the bearing first and then
+/// drives straight; with it the robot arcs to the point in one motion.
+constexpr uint8_t F_SWERVE = 1;
+
+struct Step {
+  Kind kind;
+  float a, b;
+  uint8_t flag;
+};
+
+/// Where the lift sits while driving, and full cascade travel in ticks. Kept in
+/// step with the copies in src/autons.cpp -- these are only used by the builder.
+constexpr float LIFT_TRAVEL = 0.15f;
+constexpr float LIFT_TICKS = 900.0f;
+
+/// Cap on the hand-built route.
 constexpr int MAX_STEPS = 20;
 
 struct RouteBuf {
@@ -149,8 +178,10 @@ struct RouteBuf {
 // ---------------------------------------------------------------------------
 // Starting positions
 //
-// Authored in the RED frame: the red Alliance Station is the -X wall, so a red
-// robot starts against it facing +X (heading 90). BLUE mirrors x and heading.
+// Absolute field positions, not red-frame: tapping the north wall puts the
+// robot against the north wall whichever alliance is selected. Only the
+// hand-built route is mirrored, because it is drawn on the field in the red
+// frame; a compiled routine runs exactly as written.
 // ---------------------------------------------------------------------------
 
 struct Start {
@@ -233,15 +264,17 @@ bool g_blackout = false;
 
 bool is_custom() { return g_selected >= AUTON_COUNT; }
 
-int step_count() { return is_custom() ? g_custom.n : AUTONS[g_selected].count; }
-
-const Step* raw_step_at(int i) { return is_custom() ? &g_custom.s[i] : &AUTONS[g_selected].steps[i]; }
+/// Steps only exist for the hand-built route. A compiled routine is a function;
+/// there is nothing here to count, list, animate or estimate.
+int step_count() { return is_custom() ? g_custom.n : 0; }
 
 bool mirrored() { return g_alliance == field::Alliance::BLUE; }
 
-/// A step as it will actually be driven, after alliance mirroring.
+/// A step as it will actually be driven, after alliance mirroring. Mirroring
+/// applies to the hand-built route only -- it is drawn on the field in the red
+/// frame, so it has to flip. A compiled routine runs exactly as written.
 Step step_at(int i) {
-  Step s = *raw_step_at(i);
+  Step s = g_custom.s[i];
   if (mirrored()) {
     // mirror across the Y axis: x negates, and a clockwise heading becomes
     // the same magnitude counter-clockwise. The TURN case must be re-wrapped:
@@ -254,37 +287,40 @@ Step step_at(int i) {
 }
 
 void start_pose(float& x, float& y, float& th) {
-  if (g_start_sel == 0) {
-    if (is_custom()) {
-      x = g_custom_start[0];
-      y = g_custom_start[1];
-      th = g_custom_start[2];
-    } else {
-      const Auton& a = AUTONS[g_selected];
-      x = a.start_x;
-      y = a.start_y;
-      th = a.start_heading;
-    }
-  } else {
+  if (g_start_sel != 0) {
+    // Explicit override from the START dropdown. Absolute field coordinates --
+    // not mirrored, because the point of tapping a quadrant is to put the robot
+    // in the quadrant that was tapped.
     const Start& s = STARTS[g_start_sel];
     x = s.x;
     y = s.y;
     th = s.th;
+    return;
   }
-  if (mirrored()) {
-    x = -x;
-    th = wrap180(-th);
+
+  if (is_custom()) {
+    // The hand-built route is authored in the red frame, so its start mirrors
+    // with the rest of it.
+    x = mirrored() ? -g_custom_start[0] : g_custom_start[0];
+    y = g_custom_start[1];
+    th = mirrored() ? wrap180(-g_custom_start[2]) : g_custom_start[2];
+    return;
   }
+
+  // A compiled routine's start pose is used exactly as the table gives it. If a
+  // routine wants to differ by side it can ask alliance() and setPose itself.
+  const Auton& a = AUTONS[g_selected];
+  x = a.start_x;
+  y = a.start_y;
+  th = a.start_heading;
 }
 
 // ---------------------------------------------------------------------------
 // Quadrants as the start picker
 //
-// Tapping a Toggle chooses where the robot starts. Routes are authored in the
-// RED frame and BLUE mirrors across the Y axis, so the quadrant the user taps
-// on screen is not the quadrant the stored entry names: the mirror swaps east
-// and west while leaving north and south alone. Both directions of that map
-// live here so the rest of the file never has to think about it.
+// Tapping a Toggle puts the robot against that wall. STARTS holds absolute
+// field positions, so this is a straight mapping in both directions -- it used
+// to swap east and west for blue, back when start poses were mirrored.
 // ---------------------------------------------------------------------------
 
 /// STARTS index that puts the robot in the on-screen quadrant `q`.
@@ -292,8 +328,8 @@ int start_for_quad(field::Quad q) {
   switch (q) {
     case field::Quad::NORTH: return ST_NORTH;
     case field::Quad::SOUTH: return ST_SOUTH;
-    case field::Quad::EAST: return mirrored() ? ST_WEST : ST_EAST;
-    case field::Quad::WEST: return mirrored() ? ST_EAST : ST_WEST;
+    case field::Quad::EAST: return ST_EAST;
+    case field::Quad::WEST: return ST_WEST;
   }
   return ST_DEFAULT;
 }
@@ -304,8 +340,8 @@ int highlight_quad() {
   switch (g_start_sel) {
     case ST_NORTH: return static_cast<int>(field::Quad::NORTH);
     case ST_SOUTH: return static_cast<int>(field::Quad::SOUTH);
-    case ST_EAST: return static_cast<int>(mirrored() ? field::Quad::WEST : field::Quad::EAST);
-    case ST_WEST: return static_cast<int>(mirrored() ? field::Quad::EAST : field::Quad::WEST);
+    case ST_EAST: return static_cast<int>(field::Quad::EAST);
+    case ST_WEST: return static_cast<int>(field::Quad::WEST);
     default: return -1;
   }
 }
@@ -344,7 +380,6 @@ const char* kind_tag(Kind k) {
     case Kind::LIFT: return "LIFT";
     case Kind::WAIT: return "WAIT";
     case Kind::SCORE: return "SCORE";
-    case Kind::CALL: return "CALL";
   }
   return "WAIT";
 }
@@ -356,8 +391,7 @@ bool kind_from_tag(const char* s, Kind& out) {
   };
   static const Row rows[] = {{"DRIVE", Kind::DRIVE}, {"TURN", Kind::TURN},     {"GOTO", Kind::GOTO},
                              {"INTAKE", Kind::INTAKE}, {"CLAW", Kind::CLAW}, {"LIFT", Kind::LIFT},
-                             {"WAIT", Kind::WAIT},     {"SCORE", Kind::SCORE},
-                             {"CALL", Kind::CALL}};
+                             {"WAIT", Kind::WAIT},     {"SCORE", Kind::SCORE}};
   for (const Row& r : rows) {
     if (std::strcmp(r.tag, s) == 0) {
       out = r.k;
@@ -473,7 +507,6 @@ void step_text(const Step& s, char* out, int n) {
     case Kind::LIFT: std::snprintf(out, n, "Lift    %.0f%%", static_cast<double>(s.a * 100.0f)); break;
     case Kind::WAIT: std::snprintf(out, n, "Wait    %.0f ms", static_cast<double>(s.a)); break;
     case Kind::SCORE: std::snprintf(out, n, "Score   at %.0f%%", static_cast<double>(s.a * 100.0f)); break;
-    case Kind::CALL: std::snprintf(out, n, "Call    action %d", static_cast<int>(s.a)); break;
   }
 }
 
@@ -630,12 +663,6 @@ void begin_step() {
       set_leg(g_sim.x, g_sim.y, g_sim.th, SCORE_RAISE_MS);
       g_sim.lift_to = s.a; // after set_leg, which resets it
       break;
-    case Kind::CALL:
-      // The preview cannot see inside an action, so it holds still for however
-      // long the route said the action takes and shows nothing happening. That
-      // is honest -- a guess at what the function does would be worse.
-      set_leg(g_sim.x, g_sim.y, g_sim.th, static_cast<uint32_t>(s.b));
-      break;
   }
 }
 
@@ -652,7 +679,13 @@ void begin_step() {
 uint32_t g_route_ms = 0;
 
 /// Match autonomous is 15 s; programming skills is a minute.
-uint32_t budget_ms() { return is_custom() ? 15000u : AUTONS[g_selected].budget_ms; }
+/// Match autonomous. The hand-built route is the only thing estimated, and it
+/// is always a match route -- skills gets written in C++ like everything else.
+constexpr uint32_t BUDGET_MS = 15000;
+
+/// Wall-clock length of the last real run, or 0. A measurement beats an
+/// estimate, and it is the only number available for a compiled routine.
+uint32_t g_last_run_ms = 0;
 
 uint32_t route_ms() {
   float x, y, th;
@@ -697,7 +730,6 @@ uint32_t route_ms() {
       case Kind::LIFT: break;
       case Kind::WAIT: total += static_cast<uint32_t>(s.a); break;
       case Kind::SCORE: total += SCORE_RAISE_MS + SCORE_EJECT_MS; break;
-      case Kind::CALL: total += static_cast<uint32_t>(s.b); break;
     }
   }
   return total;
@@ -1219,7 +1251,12 @@ void update_readout() {
 
   if (g_lbl_step != nullptr) {
     const int n = step_count();
-    if (g_sim.finished || n == 0) {
+    if (!is_custom()) {
+      // There is nothing to animate: a compiled routine is a function, and the
+      // only way to see its path is to run it. Say so rather than showing an
+      // idle field that looks like the preview is broken.
+      std::snprintf(buf, sizeof(buf), "compiled routine - run to trace");
+    } else if (g_sim.finished || n == 0) {
       std::snprintf(buf, sizeof(buf), "%s  -  %d step%s", route_name(g_selected), n, n == 1 ? "" : "s");
     } else {
       char b[40];
@@ -1230,13 +1267,28 @@ void update_readout() {
   }
 
   if (g_lbl_est != nullptr) {
-    // Amber means the estimate is already over the period before any PID
-    // settling time has been accounted for -- so it is optimistic amber.
-    const bool over = g_route_ms > budget_ms();
-    std::snprintf(buf, sizeof(buf), "%s~%.1f s", over ? "OVER  " : "",
-                  static_cast<double>(g_route_ms) / 1000.0);
-    lv_label_set_text(g_lbl_est, buf);
-    lv_obj_set_style_text_color(g_lbl_est, lv_color_hex(over ? ink::WARN : ink::DIM), LV_PART_MAIN);
+    uint32_t shown;
+    bool measured;
+    if (is_custom()) {
+      shown = g_route_ms; // estimated from the steps
+      measured = false;
+    } else {
+      shown = g_last_run_ms; // the only honest number for a compiled routine
+      measured = true;
+    }
+
+    if (shown == 0) {
+      lv_label_set_text(g_lbl_est, measured ? "not run yet" : "");
+      lv_obj_set_style_text_color(g_lbl_est, lv_color_hex(ink::DIM), LV_PART_MAIN);
+    } else {
+      // Amber past the period. For an estimate that is optimistic amber: it has
+      // no PID settling in it. For a measurement it is simply the truth.
+      const bool over = shown > BUDGET_MS;
+      std::snprintf(buf, sizeof(buf), "%s%s%.1f s", over ? "OVER  " : "", measured ? "" : "~",
+                    static_cast<double>(shown) / 1000.0);
+      lv_label_set_text(g_lbl_est, buf);
+      lv_obj_set_style_text_color(g_lbl_est, lv_color_hex(over ? ink::WARN : ink::DIM), LV_PART_MAIN);
+    }
   }
 }
 
@@ -1403,10 +1455,13 @@ void route_cb(lv_event_t* e) {
   g_selected = (static_cast<int>(i) <= AUTON_COUNT) ? static_cast<int>(i) : custom_sel();
   g_robot_selected = false;
   restart_preview();
-  logf("route %s  %d steps  ~%.1f s", route_name(g_selected), step_count(),
-       static_cast<double>(g_route_ms) / 1000.0);
-  if (g_route_ms > budget_ms())
-    logf("  WARNING: estimate over %lu s budget", static_cast<unsigned long>(budget_ms() / 1000));
+  if (is_custom()) {
+    logf("route Custom  %d steps  ~%.1f s", step_count(), static_cast<double>(g_route_ms) / 1000.0);
+    if (g_route_ms > BUDGET_MS)
+      logf("  WARNING: estimate over %lu s", static_cast<unsigned long>(BUDGET_MS / 1000));
+  } else {
+    logf("route %s", route_name(g_selected));
+  }
 }
 
 void start_cb(lv_event_t* e) {
@@ -1482,9 +1537,6 @@ void step_cb(lv_event_t* e) {
     case Kind::LIFT: s.a = (s.a >= 0.79f) ? 0.0f : s.a + 0.4f; break;
     case Kind::WAIT: s.a = (s.a >= 1900.0f) ? 250.0f : s.a * 2.0f; break;
     case Kind::SCORE: s.a = (s.a >= 0.79f) ? 0.30f : s.a + 0.15f; break;
-    // CALL indexes a function; there is nothing sensible to cycle it through,
-    // and silently pointing it at a different action would be worse than inert.
-    case Kind::CALL: break;
   }
   restart_preview();
 }
@@ -2380,17 +2432,36 @@ void log_clear() {
 
 void run_selected() {
   g_auton_active = true;
-  show_live(); // watch the real robot track the plan
+  show_live();  // the trail on this view is the record of what actually happened
+  g_trail_n = 0; // start the trace clean, so it is this run and not the last one
 
   float sx, sy, sth;
   start_pose(sx, sy, sth);
   chassis.setPose(sx, sy, sth);
 
   const uint32_t t0 = pros::millis();
-  const int n = step_count();
   logf("auton: %s / %s", route_name(g_selected), mirrored() ? "BLUE" : "RED");
   logf("start X %.1f Y %.1f H %.0f", static_cast<double>(sx), static_cast<double>(sy),
        static_cast<double>(sth));
+
+  // A compiled routine is just a function call. Everything below it is the
+  // interpreter for the hand-built route, which is the only thing that has
+  // steps.
+  if (!is_custom()) {
+    const AutonFn fn = AUTONS[g_selected].run;
+    if (fn != nullptr) fn();
+    else logf("routine is null");
+
+    chassis.waitUntilDone(); // in case the routine left a motion running
+    intake.move(0);
+    claw_spin.move(0);
+    g_last_run_ms = pros::millis() - t0;
+    g_auton_active = false;
+    logf("auton done in %lu ms", static_cast<unsigned long>(g_last_run_ms));
+    return;
+  }
+
+  const int n = step_count();
   for (int i = 0; i < n; ++i) {
     const Step s = step_at(i);
     switch (s.kind) {
@@ -2444,14 +2515,6 @@ void run_selected() {
         claw_spin.move(0);
         lift.move_absolute(LIFT_TRAVEL * LIFT_TICKS, 100);
         break;
-      case Kind::CALL: {
-        // Bounds-checked and null-checked: a route outliving the action it
-        // called must not take the robot down with it mid-match.
-        const int idx = static_cast<int>(s.a);
-        if (idx >= 0 && idx < ACTION_COUNT && ACTIONS[idx] != nullptr) ACTIONS[idx]();
-        else logf("  CALL %d has no action", idx);
-        break;
-      }
     }
     chassis.waitUntilDone();
     logf("%2d/%d  %s", i + 1, n, step_desc(s));
@@ -2459,8 +2522,9 @@ void run_selected() {
 
   intake.move(0);
   claw_spin.move(0);
+  g_last_run_ms = pros::millis() - t0;
   g_auton_active = false;
-  logf("auton done in %lu ms", static_cast<unsigned long>(pros::millis() - t0));
+  logf("auton done in %lu ms", static_cast<unsigned long>(g_last_run_ms));
 }
 
 } // namespace auton

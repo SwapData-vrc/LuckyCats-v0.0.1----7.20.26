@@ -1,15 +1,26 @@
 #include "subsystems.hpp" // IWYU pragma: keep
 
 
-pros::MotorGroup left_motors({-1, 2, -3}, pros::MotorGearset::blue); // left motors use 600 RPM cartridges
-pros::MotorGroup right_motors({4, -5, 6}, pros::MotorGearset::blue); // right motors use 200 RPM cartridges
+// !! UNVERIFIED: both groups are declared blue (600 RPM). The right-hand
+// comment used to say 200 RPM, which is a green cartridge -- one of the two was
+// wrong and nobody could tell which from reading this file. Open the gearboxes
+// and confirm before trusting odometry, because the cartridge, the wheel size
+// and the drivetrain RPM below all scale distance directly.
+pros::MotorGroup left_motors({-1, 2, -3}, pros::MotorGearset::blue);  // 600 RPM cartridges
+pros::MotorGroup right_motors({4, -5, 6}, pros::MotorGearset::blue);  // 600 RPM cartridges
 
 // drivetrain settings
 lemlib::Drivetrain drivetrain(&left_motors, // left motor group
                               &right_motors, // right motor group
                               10, // 10 inch track width
-                              lemlib::Omniwheel::NEW_325, // using new 4" omnis
-                              360, // drivetrain rpm is 360
+                              // NEW_325 is a 3.25" omni. The comment here used
+                              // to say 4", which would be lemlib::Omniwheel::NEW_4.
+                              // !! UNVERIFIED -- measure the actual wheel.
+                              lemlib::Omniwheel::NEW_325,
+                              // Wheel RPM after external gearing, not cartridge
+                              // RPM. 360 off a 600 RPM cartridge means a 5:3
+                              // reduction. !! UNVERIFIED -- count the teeth.
+                              360,
                               2 // horizontal drift is 2 (for now)
 );
 
@@ -26,11 +37,16 @@ lemlib::TrackingWheel horizontal_tracking_wheel(&horizontal_encoder, lemlib::Omn
 lemlib::TrackingWheel vertical_tracking_wheel(&vertical_encoder, lemlib::Omniwheel::NEW_275, -2.5);
 
 // odometry settings
-lemlib::OdomSensors sensors(&vertical_tracking_wheel, // vertical tracking wheel 1, set to null
-                            nullptr, // vertical tracking wheel 2, set to nullptr as we are using IMEs
+//
+// The comments here were left over from the LemLib template and described a
+// setup this robot does not have -- they said the first wheel was null when it
+// is not, and that the second was omitted because we use IMEs when in fact we
+// use tracking wheels. Corrected to describe what is actually wired.
+lemlib::OdomSensors sensors(&vertical_tracking_wheel,   // vertical tracking wheel 1
+                            nullptr,                    // vertical tracking wheel 2 -- only one fitted
                             &horizontal_tracking_wheel, // horizontal tracking wheel 1
-                            nullptr, // horizontal tracking wheel 2, set to nullptr as we don't have a second one
-                            &imu // inertial sensor
+                            nullptr,                    // horizontal tracking wheel 2 -- only one fitted
+                            &imu                        // inertial sensor
 );
 
 // lateral PID controller
@@ -58,6 +74,17 @@ lemlib::ControllerSettings angular_controller(2, // proportional gain (kP)
 );
 
 // create the chassis
+//
+// Drive curves go here if they are wanted, as two more arguments:
+//
+//   lemlib::ExpoDriveCurve throttle_curve(3, 10, 1.019);
+//   lemlib::ExpoDriveCurve steer_curve(3, 10, 1.019);
+//   lemlib::Chassis chassis(drivetrain, lateral_controller, angular_controller,
+//                           sensors, &throttle_curve, &steer_curve);
+//
+// A commented-out version of that used to sit inside the while loop in
+// opcontrol(), where uncommenting it would have constructed a second Chassis
+// forty times a second. It belongs beside the real one, at file scope.
 lemlib::Chassis chassis(drivetrain, // drivetrain settings
                         lateral_controller, // lateral PID settings
                         angular_controller, // angular PID settings

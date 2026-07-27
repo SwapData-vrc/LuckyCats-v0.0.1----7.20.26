@@ -20,12 +20,12 @@ pros mu            # both, then open the terminal
 
 | | |
 |---|---|
-| **`src/autons.cpp`** | **the autonomous routes — this is the file you edit** |
-| `include/autons.hpp` | the step vocabulary the routes are written in |
+| **`src/autons.cpp`** | **the autonomous routines — this is the file you edit** |
+| `include/autons.hpp` | the routine table the selector reads |
 | `src/main.cpp` | competition entry points — `initialize`, `autonomous`, `opcontrol` |
 | `src/subsystems.cpp` | motor, sensor and chassis globals; all port numbers live here |
 | `src/auton_selector.cpp` | the touchscreen UI |
-| `src/field.cpp` | field geometry, coordinates, and route definitions |
+| `src/field.cpp` | field geometry and coordinates |
 | `src/field_img.c` | field render, baked to a C array |
 | `src/logo_img.c` | team badge, baked to a C array |
 | `include/` | project headers, plus vendored PROS, LemLib and LVGL |
@@ -40,16 +40,16 @@ the UI timer, not a sleep, so it never delays autonomous starting.
 Five screens after that:
 
 - **Landing** — team badge, version, port health, and the way into the rest
-- **Run** — pick alliance, route and start position; the field preview animates
-  the route, and X / Y / heading are shown over the field
+- **Run** — pick alliance, routine and start position; X / Y / heading are shown
+  over the field, and the hand-built route animates there
 - **Design** — tap the field to drop waypoints and build a route by hand
 - **Live** — odometry readout, battery, and route recording
 - **Console** — scrolling debug log; see [Console](#console)
 
 On the field itself:
 
-- **Tap a Toggle** to start the route from that quadrant. The robot slides to
-  the new start pose and the START dropdown follows.
+- **Tap a Toggle** to start from that quadrant. The robot slides to the new
+  start pose and the START dropdown follows.
 - **Hold a Toggle** to cycle which alliance owns that quadrant. Preview only —
   it does not change what the robot does.
 
@@ -73,8 +73,8 @@ brain looks idle when you expect the selector, that is why.
 ### Console
 
 The fourth landing button opens a scrolling log: boot state, the port check,
-every route and alliance change, and — during a run — one line per step with a
-timestamp and the total at the end. `Clear` empties it.
+every routine and alliance change, and — during a run — whatever the routine
+logs, plus the total at the end. `Clear` empties it.
 
 Everything also goes to stdout, so `pros terminal` gets the full history rather
 than the last 64 lines the on-screen ring is holding.
@@ -89,80 +89,76 @@ auton::logf("lift at %d ticks", ticks);
 
 It is safe to call from any task and before `auton::init()`.
 
-## Writing autonomous routes
+## Writing autonomous routines
 
-Routes live in [`src/autons.cpp`](src/autons.cpp) and nowhere else. Add one
-there and it appears in the ROUTE dropdown, animates in the field preview, and
-runs in a match — there is nothing else to edit.
-
-```cpp
-constexpr Step MY_ROUTE[] = {
-    lift_to(LIFT_TRAVEL),
-    intake_in(),
-    go(-42, 30),   // drive to a standoff point beside the Goal
-    turn(90),      // put the BACK of the robot at the Goal
-    drive(-11),    // reverse into it
-    score(0.45),   // raise, eject off the back, return to travel height
-    drive(8),
-    intake_stop(),
-};
-
-const Auton AUTONS[] = {
-    //  name       steps     count             start x  y     heading  budget
-    {"My route", MY_ROUTE, route_n(MY_ROUTE), -52.0f, 8.0f, 90.0f, 15000},
-};
-```
-
-A route is a list of steps rather than a function full of `chassis.moveToPoint`
-calls because two things have to read it: the code that drives the robot, and
-the code that animates the preview. A function can only be executed; a list can
-be executed *and* drawn. That is what makes the preview show the route that will
-actually run instead of a picture that drifts out of date.
-
-The step vocabulary — `drive`, `turn`, `go`, `arc`, `intake_in`, `claw_grip`,
-`lift_to`, `wait`, `score`, `call` — is documented in
-[`include/autons.hpp`](include/autons.hpp), with a quick reference repeated at
-the top of `autons.cpp`.
-
-**Scoring is front-to-back.** The robot intakes at the front and ejects off the
-back, so every Goal is approached nose-out, as above. Getting that backwards
-reads identically in the step list and fails silently on the field — watch the
-preview, which draws which way the robot is facing.
-
-**Routes are written in the red frame** (red Alliance Station on the -X wall).
-Selecting Blue mirrors the whole route across the Y axis, so each route is
-written once and drives both sides.
-
-### When steps are not enough
-
-`call(n)` runs `ACTIONS[n]`, a plain function at the bottom of `autons.cpp`, so
-anything the vocabulary cannot express is still available:
+Routines live in [`src/autons.cpp`](src/autons.cpp) and nowhere else. Write an
+ordinary function, add a line to the table, and it appears in the ROUTE dropdown
+on the brain and runs in a match.
 
 ```cpp
-void unfold() {
-  lift.move_absolute(200, 100);
-  pros::delay(400);
-  claw_pivot.move_absolute(0, 100);
+void red_left() {
+  lift_to(LIFT_TRAVEL);
+  intake.move(127);
+
+  // false = block until finished. Without it this returns immediately and the
+  // next line runs while the robot is still moving.
+  chassis.moveToPoint(-42, 30, 2000, {}, false);
+
+  // Square up so the BACK faces the Goal, then reverse into it.
+  chassis.turnToHeading(90, 1000, {}, false);
+  score_backwards(11, 0.45);
 }
 
-const ActionFn ACTIONS[] = {unfold};
+const Auton AUTONS[] = {
+    //  name          function   start x   y     heading
+    {"Red left", red_left, -52.0f, 8.0f, 90.0f},
+};
 ```
 
-and then `call(0, 600)` in a route. The preview cannot see inside a function, so
-it holds still for the 600 ms you declared and the robot does not move on
-screen. Keep driving in steps and mechanism logic in actions, and the preview
-stays honest.
+Plain LemLib — `moveToPoint`, `moveToPose`, `turnToHeading`, `follow`,
+`waitUntil`, all of it — plus every motor in `subsystems.hpp` and `pros::delay`.
+There is no wrapper API and nothing to learn beyond LemLib itself.
 
-### Route estimate
+`auton::logf("...")` writes to the on-screen console and to `pros terminal`.
+Sprinkled through a routine it turns the console into a timeline of what
+actually happened, which beats guessing after a match.
 
-The number beside the ROUTE caption is how long the route is predicted to take,
-and it turns amber and says `OVER` past that route's `budget_ms`. It comes from
-the same made-up constant-rate model the preview uses, so read it as "this is
-going to be tight", never as a real time — it has no PID settling, no slew, and
-no time for anything to go wrong.
+**The selector sets the start pose** from the table before calling the routine,
+so there is no need to `setPose` first. Call it anyway to ignore the table.
 
-It charges nothing for `intake_*`, `claw_*` and `lift_to`, because
-`run_selected` issues those and moves straight on rather than waiting.
+**Nothing is mirrored for you.** A routine that has to differ by side asks
+`auton::alliance()` and branches. Mirroring used to happen behind your back,
+which meant a routine could not be read literally.
+
+**Scoring is front-to-back.** The robot intakes at the front and ejects off the
+back, so reverse into a Goal rather than driving at it. `score_backwards()` in
+`autons.cpp` is the pattern.
+
+### Seeing what a routine does
+
+The field preview cannot animate a compiled routine — it is a function, and the
+only way to know its path is to run it. The SELECT card says
+`compiled routine - run to trace` instead of pretending otherwise.
+
+Running it draws the real thing. Autonomous switches the screen to **Live**,
+clears the trail, and leaves a breadcrumb trace of the path the robot actually
+took, on the brain and in the simulator alike. In the simulator that is one
+keystroke:
+
+```
+python sim/build.py run     # then press F1
+```
+
+The number beside the ROUTE caption is the wall-clock length of the last run,
+amber past 15 s. It says `not run yet` until there is a measurement — it is a
+timing of the real thing, not a guess.
+
+### The hand-built route
+
+The Custom slot is different: it is built on the brain by tapping the field in
+the Design view, or by driving a path and recording it. That one *is* a list of
+steps the selector can read, so it animates in the preview and gets an estimated
+duration. It is for quick tests without a laptop, not for match routines.
 
 ## Simulator
 
@@ -190,19 +186,20 @@ Work in progress. Known placeholders, in rough order of how much they matter:
   port check at boot and says how many are missing, which is the fastest way to
   find out — but it can only tell you a port is empty, not that it is wired to
   the right mechanism.
-- **There are no real routes yet.** `src/autons.cpp` ships with one trivial
+- **There are no real routines yet.** `src/autons.cpp` ships with one trivial
   `Example` so there is a compiling pattern to copy. Write real ones and delete
   it.
 - `src/subsystems.cpp` declares the right drive motors as blue (600 RPM) while
   the comment says 200 RPM. One of the two is wrong.
-- `LIFT_TICKS` in `include/autons.hpp` is a guess at full cascade travel. Every
-  `lift_to` and `score` height in every route is a fraction of it, so it is the
-  single number to measure first.
+- `LIFT_TICKS` in `src/autons.cpp` is a guess at full cascade travel. Every lift
+  height is a fraction of it, so it is the single number to measure first.
 - Claw-pivot open/closed positions are unmeasured guesses.
 - Field coordinates in `src/field.cpp` — goals, toggles, loaders — are estimates,
   not published numbers. Measure before writing routes against them.
-- `opcontrol()` only drives. The lift, claw and intake have no driver controls,
-  so the robot cannot score in a match yet regardless of what autonomous does.
+- Driver controls exist but the button mapping is a guess (R1/R2 intake, L1/L2
+  lift, X/B claw). Confirm it with whoever is driving.
+- The drivetrain cartridge, wheel size and RPM in `src/subsystems.cpp` are all
+  marked UNVERIFIED. They scale odometry directly — check them before tuning.
 
 `sim/sim_hw.cpp` mirrors the globals in `src/subsystems.cpp` — including the
 `DEVICE_PORTS` manifest the boot check reads — and has to be updated alongside

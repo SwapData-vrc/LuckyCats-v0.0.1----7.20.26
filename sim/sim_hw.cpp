@@ -99,6 +99,9 @@ void Motor::move_absolute(double position, int velocity) {
 }
 
 void Motor::brake() { move(0); }
+// Accepted and discarded: nothing here coasts, so there is no difference to
+// model between hold and coast. It exists so robot code compiles unchanged.
+void Motor::set_brake_mode(MotorBrake) {}
 
 double Motor::get_position() const {
   std::lock_guard<std::mutex> lk(g_motor_m);
@@ -134,6 +137,7 @@ void MotorGroup::move_absolute(double position, int velocity) {
 }
 
 void MotorGroup::brake() { move(0); }
+void MotorGroup::set_brake_mode(MotorBrake) {}
 
 double MotorGroup::get_position() const {
   std::lock_guard<std::mutex> lk(g_motor_m);

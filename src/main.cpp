@@ -67,6 +67,13 @@ void autonomous() { auton::run_selected(); }
 void opcontrol() {
   pros::Controller master(pros::E_CONTROLLER_MASTER);
 
+  // Hold, not coast: a cascade lift on coast sinks under its own weight the
+  // moment the stick is released, and a claw that drifts open drops its load.
+  lift.set_brake_mode(pros::MotorBrake::hold);
+  claw_pivot.set_brake_mode(pros::MotorBrake::hold);
+  intake.set_brake_mode(pros::MotorBrake::coast);
+  claw_spin.set_brake_mode(pros::MotorBrake::coast);
+
   while (true) {
     // TANK control scheme
 
@@ -77,6 +84,34 @@ void opcontrol() {
     // move the robot
     chassis.tank(leftY, rightY);
 
+    // ---- manipulator -------------------------------------------------------
+    // TODO: confirm these mappings with whoever is driving. The ports they act
+    // on are still placeholders -- see src/subsystems.cpp.
+
+    // R1 / R2: intake in / out. The intake is on the front, scoring is off the
+    // back, so "out" is what pushes a load into a Goal.
+    if (master.get_digital(pros::E_CONTROLLER_DIGITAL_R1)) {
+      intake.move(127);
+      claw_spin.move(127);
+    } else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_R2)) {
+      intake.move(-127);
+      claw_spin.move(-127);
+    } else {
+      intake.move(0);
+      claw_spin.move(0);
+    }
+
+    // L1 / L2: lift up / down. Held rather than latched, so letting go stops it
+    // where it is rather than running it into a hard stop.
+    if (master.get_digital(pros::E_CONTROLLER_DIGITAL_L1)) lift.move(110);
+    else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_L2)) lift.move(-90);
+    else lift.brake();
+
+    // X / B: claw open / closed.
+    if (master.get_digital(pros::E_CONTROLLER_DIGITAL_X)) claw_pivot.move(90);
+    else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_B)) claw_pivot.move(-90);
+    else claw_pivot.brake();
+
     // A toggles route recording: drive the route by hand, press A again, and
     // the driven path lands in the Custom slot as GOTO steps.
     if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_A)) {
@@ -86,29 +121,5 @@ void opcontrol() {
 
     // delay to save resources
     pros::delay(25);
-
-/*
-	// input curve for throttle input during driver control
-lemlib::ExpoDriveCurve throttle_curve(3, // joystick deadband out of 127
-                                     10, // minimum output where drivetrain will move out of 127
-                                     1.019 // expo curve gain
-);
-
-// input curve for steer input during driver control
-lemlib::ExpoDriveCurve steer_curve(3, // joystick deadband out of 127
-                                  10, // minimum output where drivetrain will move out of 127
-                                  1.019 // expo curve gain
-);
-
-// create the chassis
-lemlib::Chassis chassis(drivetrain,
-                        lateral_controller,
-                        angular_controller,
-                        sensors,
-                        &throttle_curve, 
-                        &steer_curve
-);
-
-*/
   }
 }

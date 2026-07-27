@@ -1,132 +1,136 @@
 // ===========================================================================
-//  AUTONOMOUS ROUTES
+//  AUTONOMOUS ROUTINES
 //
-//  This is the file to edit. Everything below is either a route or a comment
-//  about how to write one; nothing else in the project needs touching to add,
-//  remove or reorder a route.
+//  This is the file to edit. Write a function, add it to the AUTONS table at
+//  the bottom, and it shows up in the ROUTE dropdown on the brain.
 //
-//  A route added here:
-//    - appears in the ROUTE dropdown on the brain
-//    - animates in the field preview, exactly as it will be driven
-//    - runs for real when autonomous() starts
-//
-//  Read include/autons.hpp first. It has the coordinate frame, the list of
-//  step types, and the reason routes are data rather than functions.
+//  Plain LemLib. Everything in the LemLib API is available here -- moveToPoint,
+//  moveToPose, turnToHeading, follow, swingToHeading, waitUntil, waitUntilDone,
+//  the lot -- plus every motor in subsystems.hpp and pros::delay.
 //
 //  ---------------------------------------------------------------------------
-//  Quick reference
+//  Things worth knowing
 //  ---------------------------------------------------------------------------
 //
-//    drive(12)          12 inches forward along the current heading
-//    drive(-12)         12 inches in reverse
-//    turn(90)           turn to face absolute heading 90 (which is +X)
-//    go(-42, 30)        turn to face (-42, 30), then drive straight at it
-//    arc(-42, 30)       arc to (-42, 30) in one motion
-//    intake_in()        rollers in   (front of the robot)
-//    intake_out()       rollers out  (back of the robot)
-//    intake_stop()
-//    claw_grip()        claw closed
-//    claw_release()     claw open
-//    lift_to(0.45)      lift to 45% of full travel
-//    wait(500)          sit still for 500 ms
-//    score(0.45)        raise to 45%, eject off the back, return to travel
-//    call(0)            run ACTIONS[0]; see the bottom of this file
+//  - Field coordinates, inches, origin at field centre. Heading 0 faces +Y and
+//    increases clockwise, so 90 faces +X. See include/autons.hpp.
 //
-//  Headings: 0 faces +Y, and they increase clockwise. So 90 faces +X, 180
-//  faces -Y, 270 faces -X.
+//  - The selector sets the start pose from the table before calling you, so
+//    there is no need to call chassis.setPose() first. Call it anyway if you
+//    want to ignore the table.
 //
-//  ---------------------------------------------------------------------------
-//  Before you trust a route
-//  ---------------------------------------------------------------------------
+//  - Motion calls are ASYNCHRONOUS unless the last argument is false. Either
+//    pass false, or call chassis.waitUntilDone() before doing anything that
+//    depends on having arrived. This is the single easiest way to write a
+//    routine that works in testing and fails on a cold field.
 //
-//  - Write it in the RED frame. Blue is mirrored for you.
-//  - The robot intakes at the FRONT and scores off the BACK, so reverse into
-//    every Goal. See the worked example in include/autons.hpp.
-//  - Watch it in the preview. The estimate beside the ROUTE dropdown says
-//    whether it fits in the period, and turns amber when it does not. It is a
-//    rough model with no PID settling in it, so treat "just under" as "over".
+//  - This robot intakes at the FRONT and ejects off the BACK, so reverse into
+//    a Goal rather than driving at it. See score_backwards() below.
+//
+//  - Nothing is mirrored for you. If a routine needs to differ by side, ask
+//    auton::alliance() and branch.
+//
+//  - auton::logf("...") writes to the on-screen console and to `pros terminal`.
+//    Sprinkle it through a routine and the console becomes a timeline of what
+//    actually happened, which beats guessing after a match.
+//
 //  - The field coordinates in src/field.cpp are estimates, not published
-//    numbers. Measure before relying on them.
+//    numbers. Measure before writing routines against them.
 // ===========================================================================
 
 #include "autons.hpp"
 
-#include "subsystems.hpp" // IWYU pragma: keep -- ACTIONS need the hardware
+#include "auton_selector.hpp" // logf, alliance
+#include "subsystems.hpp"     // chassis, lift, intake, claw_pivot, claw_spin
+
+#include <cmath>
 
 namespace auton {
 namespace {
 
+/// M_PI is a POSIX extension, not standard C++, and is not always visible.
+constexpr double PI = 3.14159265358979;
+
 // ---------------------------------------------------------------------------
-// Example route. Delete it once you have written a real one -- it exists so
-// there is a compiling pattern to copy, not because it is worth running.
-//
-// Starts against the red wall, drives out, comes back. It does not score.
+// Shared helpers. Ordinary functions -- add whatever you find yourself
+// repeating.
 // ---------------------------------------------------------------------------
 
-constexpr Step EXAMPLE[] = {
-    lift_to(LIFT_TRAVEL), // get the lift clear of the field first
-    intake_in(),
-    drive(20), // collect whatever is directly in front
-    wait(300),
-    intake_stop(),
-    drive(-14), // back off, staying on our side
-};
+/// Where the lift sits while driving: clear of the field, not extended.
+constexpr double LIFT_TRAVEL = 0.15;
+
+/// Encoder ticks for a full cascade extension.
+/// TODO: measure this. Every lift height below is a fraction of it.
+constexpr double LIFT_TICKS = 900.0;
+
+void lift_to(double height) { lift.move_absolute(height * LIFT_TICKS, 100); }
+
+/// Reverse into a Goal and eject. Assumes the robot is already squared up with
+/// its back to the Goal -- turnToHeading first.
+void score_backwards(double into_inches, double height) {
+  const lemlib::Pose p = chassis.getPose();
+  const double t = p.theta * PI / 180.0;
+  // Heading 0 is +Y and increases clockwise, so forward is (sin, cos).
+  chassis.moveToPoint(p.x - std::sin(t) * into_inches, p.y - std::cos(t) * into_inches, 1500,
+                      {.forwards = false}, false);
+
+  lift_to(height);
+  pros::delay(500);
+  intake.move(-127);
+  claw_spin.move(-127);
+  pros::delay(600);
+  intake.move(0);
+  claw_spin.move(0);
+  lift_to(LIFT_TRAVEL);
+}
+
+// ---------------------------------------------------------------------------
+// Routines
+//
+// Delete the example once you have written a real one. It exists so there is a
+// compiling pattern to copy, not because it is worth running.
+// ---------------------------------------------------------------------------
+
+void example() {
+  logf("example: start");
+
+  lift_to(LIFT_TRAVEL);
+  intake.move(127);
+
+  // false = block until finished. Without it this returns immediately and the
+  // next line runs while the robot is still moving.
+  chassis.moveToPoint(-32, 0, 2000, {}, false);
+  pros::delay(300);
+  intake.move(0);
+
+  // Square up so the BACK faces the neutral Short goal at (-40, 0), then
+  // reverse into it. Heading 90 faces +X, so the back faces -X.
+  chassis.turnToHeading(90, 1000, {}, false);
+  score_backwards(12, 0.30);
+
+  chassis.moveToPoint(-30, 0, 2000, {}, false);
+
+  logf("example: done");
+}
 
 } // namespace
 
 // ---------------------------------------------------------------------------
-// The routes, in the order they appear in the ROUTE dropdown.
+// The table, in the order the routines appear in the ROUTE dropdown.
 //
-//   name, steps, count, start x, start y, start heading, budget in ms
+//   name, function, start x, start y, start heading
 //
-// Match autonomous is 15000. Programming skills is 60000.
-//
-// C++ has no empty array, so this table needs at least one entry. If you want
-// the robot to do nothing -- which is a real choice when an elimination partner
-// runs a full-field route -- that entry is:
-//
-//   {"Do nothing", nullptr, 0, -52.0f, 0.0f, 90.0f, 15000},
-//
-//
-// A zero-step route is handled everywhere: it previews as a stationary robot
-// and autonomous() returns immediately.
+// C++ has no empty array, so this needs at least one entry. A routine with an
+// empty body is a perfectly good "do nothing", which is a real choice when an
+// elimination partner runs a full-field route.
 // ---------------------------------------------------------------------------
 
 const Auton AUTONS[] = {
-    //   name        steps     count             start x   y      heading  budget
-    {"Example", EXAMPLE, route_n(EXAMPLE), -52.0f, 0.0f, 90.0f, 15000},
+    {"Example", example, -52.0f, 0.0f, 90.0f},
 };
 
 const int AUTON_COUNT = static_cast<int>(sizeof(AUTONS) / sizeof(AUTONS[0]));
 
-static_assert(AUTON_COUNT <= MAX_AUTONS, "too many routes for the dropdown buffer");
-
-// ---------------------------------------------------------------------------
-// Actions
-//
-// For anything the step vocabulary cannot say. A route reaches these with
-// call(index), where index is the position in the table below.
-//
-// These run on the autonomous task, so pros::delay() is fine and blocking is
-// expected. The preview cannot see inside them: it holds for the expect_ms
-// passed to call() and the robot does not move on screen. Keep driving in
-// steps so the preview stays honest, and put mechanism logic here.
-//
-// Example:
-//
-//   void unfold() {
-//     lift.move_absolute(200, 100);
-//     pros::delay(400);
-//     claw_pivot.move_absolute(0, 100);
-//   }
-//
-//   const ActionFn ACTIONS[] = {unfold};
-//
-// and then call(0, 600) in a route.
-// ---------------------------------------------------------------------------
-
-const ActionFn ACTIONS[] = {nullptr}; // no actions yet; nullptr entries are skipped
-
-const int ACTION_COUNT = static_cast<int>(sizeof(ACTIONS) / sizeof(ACTIONS[0]));
+static_assert(AUTON_COUNT <= MAX_AUTONS, "too many routines for the dropdown buffer");
 
 } // namespace auton

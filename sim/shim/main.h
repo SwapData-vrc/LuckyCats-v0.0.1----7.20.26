@@ -33,6 +33,8 @@ class Motor {
   void move_velocity(int velocity);
   void move_absolute(double position, int velocity);
   void brake();
+  // Recorded and otherwise ignored -- there is no coasting mass to model here.
+  void set_brake_mode(MotorBrake mode);
 
   double get_position() const;
   double get_target_position() const;
@@ -52,6 +54,7 @@ class MotorGroup {
   void move_velocity(int velocity);
   void move_absolute(double position, int velocity);
   void brake();
+  void set_brake_mode(MotorBrake mode);
 
   double get_position() const;
   double get_target_position() const;

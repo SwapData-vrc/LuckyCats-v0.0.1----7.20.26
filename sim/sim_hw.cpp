@@ -421,3 +421,18 @@ pros::MotorGroup lift({7, -8}, pros::MotorGearset::green);
 pros::Motor claw_pivot(9, pros::MotorGearset::green);
 pros::Motor claw_spin(11, pros::MotorGearset::green);
 pros::Motor intake(12, pros::MotorGearset::blue);
+
+// Same manifest as src/subsystems.cpp. Nothing here probes it -- there are no
+// smart ports on a PC -- but the symbol has to exist or auton_selector.cpp
+// fails to link, and a stale copy would be worse than none.
+const DevicePort DEVICE_PORTS[] = {
+    {"drive L1", -1, DevKind::MOTOR},  {"drive L2", 2, DevKind::MOTOR},
+    {"drive L3", -3, DevKind::MOTOR},  {"drive R1", 4, DevKind::MOTOR},
+    {"drive R2", -5, DevKind::MOTOR},  {"drive R3", 6, DevKind::MOTOR},
+    {"lift A", 7, DevKind::MOTOR},     {"lift B", -8, DevKind::MOTOR},
+    {"claw pivot", 9, DevKind::MOTOR}, {"claw spin", 11, DevKind::MOTOR},
+    {"intake", 12, DevKind::MOTOR},    {"imu", 10, DevKind::IMU},
+    {"horiz enc", 20, DevKind::ROTATION},
+};
+
+const int DEVICE_PORT_COUNT = static_cast<int>(sizeof(DEVICE_PORTS) / sizeof(DEVICE_PORTS[0]));

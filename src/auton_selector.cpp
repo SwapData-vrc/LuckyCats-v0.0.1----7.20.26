@@ -2,6 +2,7 @@
 #include "field.hpp"          // IWYU pragma: keep
 
 #include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 
@@ -107,6 +108,28 @@ float pulse(float period) {
 }
 
 // ---------------------------------------------------------------------------
+// Debug log
+//
+// A ring of fixed-width slots. Writers can be any task -- autonomous, opcontrol
+// or the UI -- and there is no lock, because PROS's Mutex is not available to
+// the desktop simulator and a lock here would be the only thing forcing it.
+//
+// Fixed-width slots are what makes that safe rather than merely convenient: a
+// writer can never run past the end of its own slot, so the worst case if two
+// tasks log at the same instant is one garbled line, not corruption. `head`
+// is published only after the line is complete, so a reader never sees half a
+// line -- it can only miss one.
+// ---------------------------------------------------------------------------
+
+constexpr int LOG_LINES = 64; // ring depth
+constexpr int LOG_COLS = 56;  // including the timestamp and the terminator
+constexpr int LOG_VIS = 13;   // lines that fit on the console view
+
+char g_log[LOG_LINES][LOG_COLS] = {};
+volatile uint32_t g_log_head = 0;  // total lines ever written, not an index
+volatile uint32_t g_log_shown = 0; // head as of the last console repaint
+
+// ---------------------------------------------------------------------------
 // Route steps
 // ---------------------------------------------------------------------------
 
@@ -118,7 +141,21 @@ enum class Kind : uint8_t {
   CLAW,   // a = 1 close/grip, 0 open/release
   LIFT,   // a = 0..1 target height
   WAIT,   // a = milliseconds
+  SCORE,  // a = lift height 0..1; raise, eject off the back, return to travel
 };
+
+/// Where the lift sits while driving: clear of the field but not extended.
+constexpr float LIFT_TRAVEL = 0.15f;
+
+/// Encoder ticks for a full cascade extension. TODO: measure this. Every LIFT
+/// and SCORE height in every route is a fraction of it, so it is the single
+/// number that has to be right before any of them mean anything.
+constexpr float LIFT_TICKS = 900.0f;
+
+// This robot intakes at the front and scores off the back, so a Goal is
+// approached nose-out: GOTO a standoff point, TURN to put the back at the Goal,
+// DRIVE a negative distance into it, then SCORE. Every route below follows that
+// shape, and getting it backwards is the single easiest mistake to make here.
 
 /// GOTO modifier: without it the robot turns to the bearing first and then
 /// drives straight; with it the robot arcs to the point in one motion.
@@ -130,6 +167,8 @@ struct Step {
   uint8_t flag;
 };
 
+/// Cap on the hand-built route only. The presets below are plain arrays and can
+/// be any length; skills in particular is far longer than this.
 constexpr int MAX_STEPS = 20;
 
 struct RouteBuf {
@@ -173,11 +212,201 @@ const char* const START_OPTIONS = "Route default\nWest quadrant\nNorth quadrant\
 
 // ---------------------------------------------------------------------------
 // Presets, in the RED frame
+//
+// !! These are geometry, not tuning. Every coordinate comes from the estimated
+// tables in field.cpp, and none of it has been driven on a real field. Treat
+// each route as a starting shape to correct, not as something to trust in a
+// match. The lift heights in particular are guesses -- see the Status section
+// of README.md.
+//
+// Landmarks used below, all RED frame (red Alliance Station on the -X wall):
+//
+//   red Alliance Goal north  (-58,  30)   standoff (-42,  30), back at heading 90
+//   red Alliance Goal south  (-58, -30)   standoff (-42, -30), back at heading 90
+//   neutral Short, west      (-40,   0)   standoff (-26,   0), back at heading 90
+//   neutral Short, north     (  0,  40)   standoff (  0,  26), back at heading 180
+//   neutral Short, south     (  0, -40)   standoff (  0, -26), back at heading 0
+//   neutral Tall, centre     (  0,   0)   standoff (-16,   0), back at heading 270
+//   red Loader north         (-66,  54)   nose in from (-52, 54) at heading 270
+//
+// Heading convention: 0 faces +Y and increases clockwise, so 90 faces +X.
+// "Back at heading H" means the robot sits on H with its scoring side pointing
+// at the Goal, which is why the DRIVE that follows is always negative.
 // ---------------------------------------------------------------------------
 
-constexpr Step P_FWD[] = {{Kind::DRIVE, 10.0f, 0, 0}};
-constexpr Step P_BACK[] = {{Kind::DRIVE, -10.0f, 0, 0}};
-constexpr Step P_TURN[] = {{Kind::TURN, 90.0f, 0, 0}};
+// The <SC8> attempt: three Goals fed off both Alliance Goals and the west
+// neutral Short. Ambitious for 15 s -- the estimate under the ROUTE dropdown
+// says how ambitious, and it is the first thing to check after any edit.
+// There is no room in 15 s for a detour: the sweep runs on the way to each
+// standoff, not as a separate waypoint. The estimate beside the ROUTE dropdown
+// is what this was cut down against, and it is still the tightest of the eight.
+constexpr Step P_AWP[] = {
+    {Kind::LIFT, LIFT_TRAVEL, 0, 0},
+    {Kind::INTAKE, 1.0f, 0, 0},
+    {Kind::GOTO, -42.0f, 30.0f, 0},
+    {Kind::TURN, 90.0f, 0, 0},
+    {Kind::DRIVE, -11.0f, 0, 0},
+    {Kind::SCORE, 0.45f, 0, 0}, // red Alliance Goal, north
+    {Kind::DRIVE, 8.0f, 0, 0},
+    {Kind::GOTO, -42.0f, -30.0f, 0},
+    {Kind::TURN, 90.0f, 0, 0},
+    {Kind::DRIVE, -11.0f, 0, 0},
+    {Kind::SCORE, 0.45f, 0, 0}, // red Alliance Goal, south
+    {Kind::DRIVE, 8.0f, 0, 0},
+    {Kind::GOTO, -26.0f, 0.0f, 0},
+    {Kind::TURN, 90.0f, 0, 0},
+    {Kind::DRIVE, -12.0f, 0, 0},
+    {Kind::SCORE, 0.30f, 0, 0}, // neutral Short, west quadrant -- third Goal
+    {Kind::DRIVE, 8.0f, 0, 0},
+    {Kind::INTAKE, 0.0f, 0, 0},
+};
+
+// Two Goals instead of three. Drops the neutral Short, which is the leg most
+// likely to run out of clock, and never leaves the west quadrant.
+constexpr Step P_ALLIANCE[] = {
+    {Kind::LIFT, LIFT_TRAVEL, 0, 0},
+    {Kind::INTAKE, 1.0f, 0, 0},
+    {Kind::GOTO, -36.0f, 24.0f, 0},
+    {Kind::GOTO, -42.0f, 30.0f, 0},
+    {Kind::TURN, 90.0f, 0, 0},
+    {Kind::DRIVE, -11.0f, 0, 0},
+    {Kind::SCORE, 0.45f, 0, 0},
+    {Kind::DRIVE, 9.0f, 0, 0},
+    {Kind::INTAKE, 1.0f, 0, 0},
+    {Kind::GOTO, -36.0f, -24.0f, 0},
+    {Kind::GOTO, -42.0f, -30.0f, 0},
+    {Kind::TURN, 90.0f, 0, 0},
+    {Kind::DRIVE, -11.0f, 0, 0},
+    {Kind::SCORE, 0.45f, 0, 0},
+    {Kind::DRIVE, 8.0f, 0, 0},
+    {Kind::INTAKE, 0.0f, 0, 0},
+};
+
+// Starts against the north wall. Neutral Short in the north quadrant first,
+// then across to the north Alliance Goal.
+constexpr Step P_NORTH[] = {
+    {Kind::LIFT, LIFT_TRAVEL, 0, 0},
+    {Kind::INTAKE, 1.0f, 0, 0},
+    {Kind::GOTO, -12.0f, 34.0f, 0},
+    {Kind::GOTO, 0.0f, 26.0f, 0},
+    {Kind::TURN, 180.0f, 0, 0},
+    {Kind::DRIVE, -11.0f, 0, 0},
+    {Kind::SCORE, 0.30f, 0, 0}, // neutral Short, north
+    {Kind::DRIVE, 9.0f, 0, 0},
+    {Kind::INTAKE, 1.0f, 0, 0},
+    {Kind::GOTO, -30.0f, 26.0f, 0},
+    {Kind::GOTO, -42.0f, 30.0f, 0},
+    {Kind::TURN, 90.0f, 0, 0},
+    {Kind::DRIVE, -11.0f, 0, 0},
+    {Kind::SCORE, 0.45f, 0, 0}, // red Alliance Goal, north
+    {Kind::DRIVE, 8.0f, 0, 0},
+    {Kind::INTAKE, 0.0f, 0, 0},
+};
+
+// P_NORTH reflected about the X axis. Not generated from it on purpose: the
+// alliance mirror already reflects about Y, and stacking a second automatic
+// reflection makes it very hard to reason about which route is running.
+constexpr Step P_SOUTH[] = {
+    {Kind::LIFT, LIFT_TRAVEL, 0, 0},
+    {Kind::INTAKE, 1.0f, 0, 0},
+    {Kind::GOTO, -12.0f, -34.0f, 0},
+    {Kind::GOTO, 0.0f, -26.0f, 0},
+    {Kind::TURN, 0.0f, 0, 0},
+    {Kind::DRIVE, -11.0f, 0, 0},
+    {Kind::SCORE, 0.30f, 0, 0}, // neutral Short, south
+    {Kind::DRIVE, 9.0f, 0, 0},
+    {Kind::INTAKE, 1.0f, 0, 0},
+    {Kind::GOTO, -30.0f, -26.0f, 0},
+    {Kind::GOTO, -42.0f, -30.0f, 0},
+    {Kind::TURN, 90.0f, 0, 0},
+    {Kind::DRIVE, -11.0f, 0, 0},
+    {Kind::SCORE, 0.45f, 0, 0}, // red Alliance Goal, south
+    {Kind::DRIVE, 8.0f, 0, 0},
+    {Kind::INTAKE, 0.0f, 0, 0},
+};
+
+// The centre Tall Goal, which needs most of the cascade. Few Pins, but it is
+// the only Goal worth contesting early and it leaves the robot in the midfield.
+constexpr Step P_TALL[] = {
+    {Kind::LIFT, LIFT_TRAVEL, 0, 0},
+    {Kind::INTAKE, 1.0f, 0, 0},
+    {Kind::GOTO, -30.0f, 0.0f, 0},
+    {Kind::INTAKE, 0.0f, 0, 0},
+    {Kind::LIFT, 0.80f, 0, 0}, // raise while still clear of the goal
+    {Kind::GOTO, -16.0f, 0.0f, 0},
+    {Kind::TURN, 270.0f, 0, 0},
+    {Kind::DRIVE, -6.0f, 0, 0},
+    {Kind::SCORE, 0.80f, 0, 0},
+    {Kind::DRIVE, 10.0f, 0, 0},
+    {Kind::LIFT, LIFT_TRAVEL, 0, 0},
+};
+
+// For an elimination partner who runs the whole field: take the Pins directly
+// in front, back off, and stay out of the way. Never crosses the centre.
+constexpr Step P_SAFE[] = {
+    {Kind::LIFT, LIFT_TRAVEL, 0, 0},
+    {Kind::INTAKE, 1.0f, 0, 0},
+    {Kind::DRIVE, 20.0f, 0, 0},
+    {Kind::WAIT, 400.0f, 0, 0},
+    {Kind::INTAKE, 0.0f, 0, 0},
+    {Kind::DRIVE, -14.0f, 0, 0},
+};
+
+// Genuinely doing nothing is a real choice, and it is safer to pick it here
+// than to leave a route selected and hope nobody presses run.
+constexpr Step P_NONE[] = {{Kind::WAIT, 250.0f, 0, 0}};
+
+// 60 s skills. Both Alliance Goals twice via the north Loader, both reachable
+// neutral Shorts, then the Tall Goal to finish.
+constexpr Step P_SKILLS[] = {
+    {Kind::LIFT, LIFT_TRAVEL, 0, 0},
+    {Kind::INTAKE, 1.0f, 0, 0},
+    {Kind::GOTO, -34.0f, 24.0f, 0},
+    {Kind::GOTO, -42.0f, 30.0f, 0},
+    {Kind::TURN, 90.0f, 0, 0},
+    {Kind::DRIVE, -11.0f, 0, 0},
+    {Kind::SCORE, 0.45f, 0, 0}, // Alliance Goal north, load 1
+    {Kind::DRIVE, 9.0f, 0, 0},
+    // reload at the north Loader: nose in, this is the intake side
+    {Kind::GOTO, -52.0f, 54.0f, 0},
+    {Kind::TURN, 270.0f, 0, 0},
+    {Kind::INTAKE, 1.0f, 0, 0},
+    {Kind::DRIVE, 8.0f, 0, 0},
+    {Kind::WAIT, 700.0f, 0, 0},
+    {Kind::DRIVE, -8.0f, 0, 0},
+    {Kind::GOTO, -42.0f, 30.0f, 0},
+    {Kind::TURN, 90.0f, 0, 0},
+    {Kind::DRIVE, -11.0f, 0, 0},
+    {Kind::SCORE, 0.45f, 0, 0}, // Alliance Goal north, load 2
+    {Kind::DRIVE, 9.0f, 0, 0},
+    {Kind::INTAKE, 1.0f, 0, 0},
+    {Kind::GOTO, -34.0f, -24.0f, 0},
+    {Kind::GOTO, -42.0f, -30.0f, 0},
+    {Kind::TURN, 90.0f, 0, 0},
+    {Kind::DRIVE, -11.0f, 0, 0},
+    {Kind::SCORE, 0.45f, 0, 0}, // Alliance Goal south
+    {Kind::DRIVE, 9.0f, 0, 0},
+    {Kind::INTAKE, 1.0f, 0, 0},
+    {Kind::GOTO, -26.0f, 0.0f, 0},
+    {Kind::TURN, 90.0f, 0, 0},
+    {Kind::DRIVE, -12.0f, 0, 0},
+    {Kind::SCORE, 0.30f, 0, 0}, // neutral Short, west
+    {Kind::DRIVE, 9.0f, 0, 0},
+    {Kind::INTAKE, 1.0f, 0, 0},
+    {Kind::GOTO, 0.0f, -26.0f, 0},
+    {Kind::TURN, 0.0f, 0, 0},
+    {Kind::DRIVE, -11.0f, 0, 0},
+    {Kind::SCORE, 0.30f, 0, 0}, // neutral Short, south
+    {Kind::DRIVE, 9.0f, 0, 0},
+    {Kind::INTAKE, 0.0f, 0, 0},
+    {Kind::LIFT, 0.80f, 0, 0},
+    {Kind::GOTO, -16.0f, 0.0f, 0},
+    {Kind::TURN, 270.0f, 0, 0},
+    {Kind::DRIVE, -6.0f, 0, 0},
+    {Kind::SCORE, 0.80f, 0, 0}, // Tall Goal
+    {Kind::DRIVE, 10.0f, 0, 0},
+    {Kind::LIFT, LIFT_TRAVEL, 0, 0},
+};
 
 struct Preset {
   const char* name;
@@ -186,20 +415,32 @@ struct Preset {
   float sx, sy, sth; // start pose used when the start dropdown says "default"
 };
 
-const Preset PRESETS[3] = {
-    {"Forward 10 in", P_FWD, 1, -52.0f, 0.0f, 90.0f},
-    {"Backward 10 in", P_BACK, 1, -40.0f, 0.0f, 90.0f},
-    {"Turn 90 CW", P_TURN, 1, -52.0f, 0.0f, 90.0f},
+/// N(a) is only correct because every preset is a plain array in this file.
+#define ROUTE_N(a) (static_cast<int>(sizeof(a) / sizeof((a)[0])))
+
+// Order must match enum Route in auton_selector.hpp and ROUTE_OPTIONS below.
+const Preset PRESETS[ROUTE_COUNT - 1] = {
+    {"AWP - 3 goals", P_AWP, ROUTE_N(P_AWP), -52.0f, 8.0f, 90.0f},
+    {"Alliance goals", P_ALLIANCE, ROUTE_N(P_ALLIANCE), -52.0f, 8.0f, 90.0f},
+    {"North quadrant", P_NORTH, ROUTE_N(P_NORTH), 0.0f, 52.0f, 180.0f},
+    {"South quadrant", P_SOUTH, ROUTE_N(P_SOUTH), 0.0f, -52.0f, 0.0f},
+    {"Tall goal", P_TALL, ROUTE_N(P_TALL), -52.0f, 0.0f, 90.0f},
+    {"Safe - hold side", P_SAFE, ROUTE_N(P_SAFE), -52.0f, 0.0f, 90.0f},
+    {"Do nothing", P_NONE, ROUTE_N(P_NONE), -52.0f, 0.0f, 90.0f},
+    {"Skills (60 s)", P_SKILLS, ROUTE_N(P_SKILLS), -52.0f, 8.0f, 90.0f},
 };
 
-const char* const ROUTE_OPTIONS = "Forward 10 in\nBackward 10 in\nTurn 90 CW\nCustom route";
+#undef ROUTE_N
+
+const char* const ROUTE_OPTIONS = "AWP - 3 goals\nAlliance goals\nNorth quadrant\nSouth quadrant\n"
+                                  "Tall goal\nSafe - hold side\nDo nothing\nSkills (60 s)\nCustom route";
 
 // The custom route. RAM only -- never written to flash, so it is gone on power
 // cycle. It is kept after a run so you can re-run the same test.
 RouteBuf g_custom{{}, 0};
 float g_custom_start[3] = {-52.0f, 0.0f, 90.0f};
 
-Route g_selected = Route::FORWARD_10;
+Route g_selected = Route::AWP;
 field::Alliance g_alliance = field::Alliance::RED;
 int g_start_sel = 0;
 
@@ -322,6 +563,7 @@ const char* kind_tag(Kind k) {
     case Kind::CLAW: return "CLAW";
     case Kind::LIFT: return "LIFT";
     case Kind::WAIT: return "WAIT";
+    case Kind::SCORE: return "SCORE";
   }
   return "WAIT";
 }
@@ -333,7 +575,7 @@ bool kind_from_tag(const char* s, Kind& out) {
   };
   static const Row rows[] = {{"DRIVE", Kind::DRIVE}, {"TURN", Kind::TURN},     {"GOTO", Kind::GOTO},
                              {"INTAKE", Kind::INTAKE}, {"CLAW", Kind::CLAW}, {"LIFT", Kind::LIFT},
-                             {"WAIT", Kind::WAIT}};
+                             {"WAIT", Kind::WAIT},     {"SCORE", Kind::SCORE}};
   for (const Row& r : rows) {
     if (std::strcmp(r.tag, s) == 0) {
       out = r.k;
@@ -369,25 +611,37 @@ void load_saved() {
 
   char line[128];
   int n = 0;
+  bool first = true;
   while (std::fgets(line, sizeof(line), f) != nullptr) {
+    char* p = line;
+    // Notepad and PowerShell both write a UTF-8 BOM. Without this the first
+    // line silently fails to parse and only the first setting is lost, which is
+    // a genuinely baffling thing to debug. The file is documented as hand
+    // editable, so it has to survive being hand edited.
+    if (first) {
+      first = false;
+      if (static_cast<unsigned char>(p[0]) == 0xEF && static_cast<unsigned char>(p[1]) == 0xBB &&
+          static_cast<unsigned char>(p[2]) == 0xBF)
+        p += 3;
+    }
     int iv = 0;
     float a = 0, b = 0, c = 0;
     unsigned fl = 0;
     char tag[16];
 
-    if (std::sscanf(line, "alliance %d", &iv) == 1) {
+    if (std::sscanf(p, "alliance %d", &iv) == 1) {
       g_alliance = iv ? field::Alliance::BLUE : field::Alliance::RED;
-    } else if (std::sscanf(line, "route %d", &iv) == 1) {
+    } else if (std::sscanf(p, "route %d", &iv) == 1) {
       if (iv >= 0 && iv < ROUTE_COUNT) g_selected = static_cast<Route>(iv);
-    } else if (std::sscanf(line, "start %d", &iv) == 1) {
+    } else if (std::sscanf(p, "start %d", &iv) == 1) {
       if (iv >= 0 && iv < START_COUNT) g_start_sel = iv;
-    } else if (std::sscanf(line, "blackout %d", &iv) == 1) {
+    } else if (std::sscanf(p, "blackout %d", &iv) == 1) {
       g_blackout = (iv != 0);
-    } else if (std::sscanf(line, "customstart %f %f %f", &a, &b, &c) == 3) {
+    } else if (std::sscanf(p, "customstart %f %f %f", &a, &b, &c) == 3) {
       g_custom_start[0] = a;
       g_custom_start[1] = b;
       g_custom_start[2] = c;
-    } else if (std::sscanf(line, "step %15s %f %f %u", tag, &a, &b, &fl) == 4) {
+    } else if (std::sscanf(p, "step %15s %f %f %u", tag, &a, &b, &fl) == 4) {
       Kind k;
       if (kind_from_tag(tag, k) && n < MAX_STEPS)
         g_custom.s[n++] = Step{k, a, b, static_cast<uint8_t>(fl)};
@@ -398,7 +652,7 @@ void load_saved() {
 
   // A saved CUSTOM selection with nothing in it would leave the user staring at
   // an empty preview with no obvious cause.
-  if (g_selected == Route::CUSTOM && g_custom.n == 0) g_selected = Route::FORWARD_10;
+  if (g_selected == Route::CUSTOM && g_custom.n == 0) g_selected = Route::AWP;
 }
 
 /// Note a change without writing yet. Every tap would otherwise hit the SD card
@@ -436,7 +690,16 @@ void step_text(const Step& s, char* out, int n) {
     case Kind::CLAW: std::snprintf(out, n, "Claw    %s", s.a > 0.5f ? "GRIP" : "RELEASE"); break;
     case Kind::LIFT: std::snprintf(out, n, "Lift    %.0f%%", static_cast<double>(s.a * 100.0f)); break;
     case Kind::WAIT: std::snprintf(out, n, "Wait    %.0f ms", static_cast<double>(s.a)); break;
+    case Kind::SCORE: std::snprintf(out, n, "Score   at %.0f%%", static_cast<double>(s.a * 100.0f)); break;
   }
+}
+
+/// step_text into a shared buffer, for log lines. Not reentrant, and only ever
+/// called from the one autonomous task.
+const char* step_desc(const Step& s) {
+  static char buf[40];
+  step_text(s, buf, sizeof(buf));
+  return buf;
 }
 
 // ---------------------------------------------------------------------------
@@ -451,6 +714,19 @@ constexpr uint32_t END_HOLD_MS = 900;
 
 constexpr float REACH_IN = 4.0f;   // intake sits this far in front of the bumper
 constexpr float REACH_R_IN = 5.0f; // radius the intake acts over
+
+// SCORE is two legs. These are guesses at cascade travel time and want
+// measuring against the real lift -- they are what makes the route estimate
+// under the ROUTE dropdown optimistic or pessimistic.
+constexpr uint32_t SCORE_RAISE_MS = 600;
+constexpr uint32_t SCORE_EJECT_MS = 700;
+
+// How long the preview holds on a step that does not move the robot. Also what
+// the route estimate charges for them, which is why they are constants rather
+// than literals buried in begin_step.
+constexpr uint32_t INTAKE_MS = 420;
+constexpr uint32_t CLAW_MS = 360;
+constexpr uint32_t LIFT_MS = 650;
 
 struct Sim {
   int step_i;
@@ -550,26 +826,99 @@ void begin_step() {
     }
     case Kind::INTAKE:
       g_sim.intake = static_cast<int>(s.a);
-      set_leg(g_sim.x, g_sim.y, g_sim.th, 420);
+      set_leg(g_sim.x, g_sim.y, g_sim.th, INTAKE_MS);
       break;
     case Kind::CLAW:
       g_sim.claw = (s.a > 0.5f);
-      set_leg(g_sim.x, g_sim.y, g_sim.th, 360);
+      set_leg(g_sim.x, g_sim.y, g_sim.th, CLAW_MS);
       break;
     case Kind::LIFT:
-      set_leg(g_sim.x, g_sim.y, g_sim.th, 650);
+      set_leg(g_sim.x, g_sim.y, g_sim.th, LIFT_MS);
       g_sim.lift_to = s.a; // after set_leg -- it resets lift_to to the current height
       break;
     case Kind::WAIT:
       set_leg(g_sim.x, g_sim.y, g_sim.th, static_cast<uint32_t>(s.a));
       break;
+    case Kind::SCORE:
+      // phase 0 raises; sim_tick starts phase 1, which ejects and comes back
+      // down. Two phases rather than one so the preview shows the lift going up
+      // before anything leaves the robot, which is the order that matters when
+      // checking a Goal is tall enough.
+      set_leg(g_sim.x, g_sim.y, g_sim.th, SCORE_RAISE_MS);
+      g_sim.lift_to = s.a; // after set_leg, which resets it
+      break;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Route estimate
+//
+// Walks the route without animating it and adds up the same per-leg durations
+// the preview uses, so the SELECT card can say whether a route fits in the
+// period before anyone drives it. It inherits every limitation of the preview
+// -- constant rate, no PID settling, no slew -- so read it as "this route is
+// nowhere near 15 s" or "this is going to be tight", never as a real time.
+// ---------------------------------------------------------------------------
+
+uint32_t g_route_ms = 0;
+
+/// Match autonomous is 15 s; programming skills is a minute.
+uint32_t budget_ms() { return (g_selected == Route::SKILLS) ? 60000u : 15000u; }
+
+uint32_t route_ms() {
+  float x, y, th;
+  start_pose(x, y, th);
+
+  uint32_t total = 0;
+  const int n = step_count();
+  for (int i = 0; i < n; ++i) {
+    const Step s = step_at(i);
+    switch (s.kind) {
+      case Kind::DRIVE: {
+        const float t = th * PI_F / 180.0f;
+        x += std::sin(t) * s.a;
+        y += std::cos(t) * s.a;
+        total += drive_ms(s.a);
+        break;
+      }
+      case Kind::TURN: {
+        const float d = wrap180(s.a - th);
+        th = wrap180(th + d);
+        total += turn_ms(d);
+        break;
+      }
+      case Kind::GOTO: {
+        const float bear = bearing_to(x, y, s.a, s.b);
+        const float d = wrap180(bear - th);
+        const float dist = std::sqrt((s.a - x) * (s.a - x) + (s.b - y) * (s.b - y));
+        total += (s.flag & F_SWERVE) ? drive_ms(dist) + turn_ms(d) / 2 : turn_ms(d) + drive_ms(dist);
+        x = s.a;
+        y = s.b;
+        th = wrap180(bear);
+        break;
+      }
+      // INTAKE, CLAW and LIFT cost nothing here on purpose. run_selected issues
+      // them and moves straight on -- move() and move_absolute() do not block,
+      // and the waitUntilDone() that follows is waiting on the chassis, which
+      // is not moving. The preview holds on them (INTAKE_MS and friends) only
+      // so a person watching can see them happen; charging the estimate for
+      // that dwell would put every route seconds over its real cost.
+      case Kind::INTAKE:
+      case Kind::CLAW:
+      case Kind::LIFT: break;
+      case Kind::WAIT: total += static_cast<uint32_t>(s.a); break;
+      case Kind::SCORE: total += SCORE_RAISE_MS + SCORE_EJECT_MS; break;
+    }
+  }
+  return total;
 }
 
 /// Restart the preview. When `animate` is set the robot slides from wherever it
 /// currently sits to the new start pose before the route begins, which is what
 /// makes tapping a quadrant read as "the robot moved there" rather than a jump.
 void sim_begin(bool animate) {
+  g_route_ms = route_ms();
+
   for (int i = 0; i < 4; ++i) field::toggle_owner[i] = field::Alliance::NEUTRAL;
 
   const float ox = g_sim.x, oy = g_sim.y, oth = g_sim.th;
@@ -663,6 +1012,16 @@ void sim_tick() {
     set_leg(s.a, s.b, g_sim.th, drive_ms(dist));
     return;
   }
+
+  // SCORE has finished raising; now eject off the back and come back down
+  if (s.kind == Kind::SCORE && g_sim.phase == 0) {
+    g_sim.phase = 1;
+    g_sim.intake = -1;
+    set_leg(g_sim.x, g_sim.y, g_sim.th, SCORE_EJECT_MS);
+    g_sim.lift_to = LIFT_TRAVEL;
+    return;
+  }
+  if (s.kind == Kind::SCORE) g_sim.intake = 0;
 
   ++g_sim.step_i;
   if (g_sim.step_i >= step_count()) {
@@ -927,10 +1286,11 @@ void draw_trail(lv_layer_t* l) {
 // Views
 // ---------------------------------------------------------------------------
 
-enum class View : uint8_t { LANDING = 0, SELECT = 1, EDIT = 2, LIVE = 3 };
+enum class View : uint8_t { LANDING = 0, SELECT = 1, EDIT = 2, LIVE = 3, CONSOLE = 4 };
+constexpr int VIEW_COUNT = 5;
 
 View g_view = View::LANDING;
-lv_obj_t* g_root[4] = {nullptr, nullptr, nullptr, nullptr};
+lv_obj_t* g_root[VIEW_COUNT] = {};
 
 // SELECT widgets
 lv_obj_t* g_dd_alliance = nullptr;
@@ -938,6 +1298,7 @@ lv_obj_t* g_dd_route = nullptr;
 lv_obj_t* g_dd_start = nullptr;
 lv_obj_t* g_lbl_pose = nullptr;
 lv_obj_t* g_lbl_step = nullptr;
+lv_obj_t* g_lbl_est = nullptr;
 
 // EDIT widgets
 lv_obj_t* g_dd_add = nullptr;
@@ -962,6 +1323,13 @@ lv_obj_t* g_lbl_lh = nullptr;
 lv_obj_t* g_lbl_batt = nullptr;
 lv_obj_t* g_lbl_rec = nullptr;
 lv_obj_t* g_btn_rec_lbl = nullptr;
+
+// CONSOLE widgets
+lv_obj_t* g_lbl_log = nullptr;
+lv_obj_t* g_lbl_log_count = nullptr;
+
+// LANDING widgets
+lv_obj_t* g_lbl_health = nullptr;
 
 // Overlays. Neither is a View: both sit on top of whatever the selector is
 // already showing, and blackout in particular has to survive a view switch
@@ -994,14 +1362,18 @@ const char* route_name(Route r) {
   return PRESETS[static_cast<int>(r)].name;
 }
 
-bool canvas_visible() { return g_view != View::LANDING && !g_intro_active && !g_blackout; }
+/// The console and the landing page are the two views that own the full width,
+/// so the field preview has to get out of the way for both.
+bool canvas_visible() {
+  return g_view != View::LANDING && g_view != View::CONSOLE && !g_intro_active && !g_blackout;
+}
 
 void set_view(View v) {
   g_view = v;
   // An overlay owns the screen outright: the view still changes underneath so
   // that dismissing the overlay lands somewhere sensible, but nothing shows.
   const bool covered = g_intro_active || g_blackout;
-  for (int i = 0; i < 4; ++i) {
+  for (int i = 0; i < VIEW_COUNT; ++i) {
     if (g_root[i] == nullptr) continue;
     if (!covered && i == static_cast<int>(v)) {
       lv_obj_remove_flag(g_root[i], LV_OBJ_FLAG_HIDDEN);
@@ -1064,6 +1436,46 @@ void update_readout() {
       std::snprintf(buf, sizeof(buf), "%d/%d  %s", g_sim.step_i + 1, n, b);
     }
     lv_label_set_text(g_lbl_step, buf);
+  }
+
+  if (g_lbl_est != nullptr) {
+    // Amber means the estimate is already over the period before any PID
+    // settling time has been accounted for -- so it is optimistic amber.
+    const bool over = g_route_ms > budget_ms();
+    std::snprintf(buf, sizeof(buf), "%s~%.1f s", over ? "OVER  " : "",
+                  static_cast<double>(g_route_ms) / 1000.0);
+    lv_label_set_text(g_lbl_est, buf);
+    lv_obj_set_style_text_color(g_lbl_est, lv_color_hex(over ? ink::WARN : ink::DIM), LV_PART_MAIN);
+  }
+}
+
+/// Rebuild the console text, but only when there is something new to show --
+/// this runs at 20 fps and lv_label_set_text reflows the whole block.
+void update_console() {
+  if (g_lbl_log == nullptr) return;
+  const uint32_t head = g_log_head;
+  if (head == g_log_shown) return;
+  g_log_shown = head;
+
+  if (head == 0) {
+    lv_label_set_text(g_lbl_log, "(nothing logged yet)");
+  } else {
+    const uint32_t first = (head > LOG_VIS) ? head - LOG_VIS : 0;
+    char buf[LOG_VIS * LOG_COLS + 8];
+    int p = 0;
+    for (uint32_t i = first; i < head && p < static_cast<int>(sizeof(buf)) - 2; ++i) {
+      if (i > first) buf[p++] = '\n';
+      const char* line = g_log[i % LOG_LINES];
+      p += std::snprintf(buf + p, sizeof(buf) - static_cast<size_t>(p), "%s", line);
+    }
+    buf[sizeof(buf) - 1] = '\0';
+    lv_label_set_text(g_lbl_log, buf);
+  }
+
+  if (g_lbl_log_count != nullptr) {
+    char c[32];
+    std::snprintf(c, sizeof(c), "%lu line%s", static_cast<unsigned long>(head), head == 1 ? "" : "s");
+    lv_label_set_text(g_lbl_log_count, c);
   }
 }
 
@@ -1192,6 +1604,7 @@ void alliance_cb(lv_event_t* e) {
                                                                           : field::Alliance::BLUE;
   g_robot_selected = false;
   restart_preview();
+  logf("alliance %s", mirrored() ? "BLUE" : "RED");
 }
 
 void route_cb(lv_event_t* e) {
@@ -1199,6 +1612,10 @@ void route_cb(lv_event_t* e) {
   g_selected = static_cast<Route>(i < ROUTE_COUNT ? i : 0);
   g_robot_selected = false;
   restart_preview();
+  logf("route %s  %d steps  ~%.1f s", route_name(g_selected), step_count(),
+       static_cast<double>(g_route_ms) / 1000.0);
+  if (g_route_ms > budget_ms())
+    logf("  WARNING: estimate over %lu s budget", static_cast<unsigned long>(budget_ms() / 1000));
 }
 
 void start_cb(lv_event_t* e) {
@@ -1230,11 +1647,7 @@ void add_cb(lv_event_t* e) {
     case 6: push_step(Kind::LIFT, 0.8f); break;
     case 7: push_step(Kind::LIFT, 0.0f); break;
     case 8: push_step(Kind::WAIT, 500.0f); break;
-    case 9: // "Score sequence": raise, spit out, drop back down
-      push_step(Kind::LIFT, 0.8f);
-      push_step(Kind::INTAKE, -1.0f);
-      push_step(Kind::LIFT, 0.0f);
-      break;
+    case 9: push_step(Kind::SCORE, 0.45f); break;
     default: break;
   }
   lv_dropdown_set_selected(dd, 0);
@@ -1277,11 +1690,17 @@ void step_cb(lv_event_t* e) {
     case Kind::CLAW: s.a = (s.a > 0.5f) ? 0.0f : 1.0f; break;
     case Kind::LIFT: s.a = (s.a >= 0.79f) ? 0.0f : s.a + 0.4f; break;
     case Kind::WAIT: s.a = (s.a >= 1900.0f) ? 250.0f : s.a * 2.0f; break;
+    case Kind::SCORE: s.a = (s.a >= 0.79f) ? 0.30f : s.a + 0.15f; break;
   }
   restart_preview();
 }
 
 void rec_btn_cb(lv_event_t*) { g_req_rec_toggle = true; }
+
+void log_clear_cb(lv_event_t*) {
+  log_clear();
+  update_console();
+}
 
 void trail_btn_cb(lv_event_t*) {
   g_trail_n = 0;
@@ -1388,12 +1807,16 @@ void anim_cb(lv_timer_t*) {
         recording_commit();
         lv_dropdown_set_selected(g_dd_route, static_cast<uint32_t>(Route::CUSTOM));
         refresh_steps();
+        logf("recorded %d waypoints into Custom", g_custom.n);
+      } else {
+        logf("recording discarded: %d waypoints", g_rec_n);
       }
     } else {
       g_rec_n = 0;
       g_trail_n = 0;
       g_recording = true;
       if (g_view != View::LIVE) set_view(View::LIVE);
+      logf("recording started");
     }
   }
 
@@ -1412,6 +1835,11 @@ void anim_cb(lv_timer_t*) {
       lv_obj_set_style_text_color(g_black_hint,
                                   lv_color_hex(mix(0x3a424c, ink::DIM, pulse(78.0f))), LV_PART_MAIN);
     return;
+  }
+
+  if (g_view == View::CONSOLE) {
+    update_console();
+    return; // no field, no preview -- nothing else on this view moves
   }
 
   if (g_view == View::SELECT || g_view == View::EDIT) sim_tick();
@@ -1474,10 +1902,17 @@ lv_obj_t* make_dropdown(lv_obj_t* parent, int x, int y, int w, const char* optio
   lv_obj_set_style_shadow_width(d, 0, LV_PART_MAIN);
 
   lv_obj_t* list = lv_dropdown_get_list(d);
+  // The list is clamped to the screen, not to the card, so its height is fixed
+  // by where the dropdown sits -- about 96 px for the ROUTE row. Nine routes in
+  // 96 px is three visible rows at the default 14 pt, which is a lot of
+  // dragging on a resistive screen. Dropping the list to 12 pt with tighter
+  // rows fits five without making the options hard to read.
+  lv_obj_set_style_max_height(list, 200, LV_PART_MAIN);
+  lv_obj_set_style_pad_ver(list, 2, LV_PART_MAIN);
   lv_obj_set_style_bg_color(list, lv_color_hex(ink::CARD), LV_PART_MAIN);
   lv_obj_set_style_border_color(list, lv_color_hex(ink::EDGE), LV_PART_MAIN);
   lv_obj_set_style_text_color(list, lv_color_hex(ink::TEXT), LV_PART_MAIN);
-  lv_obj_set_style_text_font(list, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_font(list, &lv_font_montserrat_12, LV_PART_MAIN);
   lv_obj_set_style_radius(list, 6, LV_PART_MAIN);
   const lv_style_selector_t sel =
       static_cast<lv_style_selector_t>(LV_PART_SELECTED) | static_cast<lv_style_selector_t>(LV_STATE_CHECKED);
@@ -1581,15 +2016,24 @@ void build_landing(lv_obj_t* scr) {
   make_caption(root, RX + 2, 70, "V5RC OVERRIDE   2026-27");
 
   // ---- entry points ----
+  // Four buttons at 32 px with a 4 px gap, which is the most that fits under
+  // the title block without crowding the bottom edge.
   constexpr int BW = 256;
-  make_button(root, RX, 96, BW, 34, "Run a route", nav_cb, static_cast<int>(View::SELECT), ink::CTRL_HI,
+  constexpr int BH = 32;
+  constexpr int B0 = 92;
+  make_button(root, RX, B0, BW, BH, "Run a route", nav_cb, static_cast<int>(View::SELECT), ink::CTRL_HI,
               &lv_font_montserrat_16);
-  make_button(root, RX, 136, BW, 34, "Design a route", nav_cb, static_cast<int>(View::EDIT), ink::CTRL_HI,
+  make_button(root, RX, B0 + 36, BW, BH, "Design a route", nav_cb, static_cast<int>(View::EDIT), ink::CTRL_HI,
               &lv_font_montserrat_16);
-  make_button(root, RX, 176, BW, 34, "Live telemetry", nav_cb, static_cast<int>(View::LIVE), ink::CTRL_HI,
+  make_button(root, RX, B0 + 72, BW, BH, "Live telemetry", nav_cb, static_cast<int>(View::LIVE), ink::CTRL_HI,
+              &lv_font_montserrat_16);
+  make_button(root, RX, B0 + 108, BW, BH, "Console", nav_cb, static_cast<int>(View::CONSOLE), ink::CTRL,
               &lv_font_montserrat_16);
 
-  make_label(root, LX + 20, LY + LOGO_BOX + 12, "LuckyCats  v0.0.1", ink::DIM, &lv_font_montserrat_10);
+  make_label(root, LX + 20, LY + LOGO_BOX + 6, "LuckyCats  v0.0.1", ink::DIM, &lv_font_montserrat_10);
+  // Filled in by the boot-time port check. Under the badge rather than on the
+  // console, because a missing motor has to be visible without going looking.
+  g_lbl_health = make_label(root, LX + 20, LY + LOGO_BOX + 20, "", ink::DIM, &lv_font_montserrat_10);
 
   // Blackout, tucked in the corner. Deliberately unlabelled and low contrast:
   // it is for the team, and an obvious "HIDE ROUTE" button is itself a tell.
@@ -1610,6 +2054,12 @@ void build_select(lv_obj_t* scr) {
   g_dd_alliance = make_dropdown(card, 0, 44, COL_W, "Red\nBlue", alliance_cb);
 
   make_caption(card, 2, 80, "ROUTE");
+  // Estimate lives on the caption row, not down with the step readout: it has
+  // to be readable while the preview is mid-route, and the readout line is
+  // busy naming the step that is currently running.
+  g_lbl_est = make_label(card, 84, 80, "", ink::DIM, &lv_font_montserrat_10);
+  lv_obj_set_width(g_lbl_est, COL_W - 84);
+  lv_obj_set_style_text_align(g_lbl_est, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
   g_dd_route = make_dropdown(card, 0, 92, COL_W, ROUTE_OPTIONS, route_cb);
 
   make_caption(card, 2, 128, "START");
@@ -1630,7 +2080,7 @@ void build_edit(lv_obj_t* scr) {
 
   g_dd_add = make_dropdown(card, 0, 32, COL_W,
                            "Drive\nTurn\nIntake in\nIntake out\nClaw grip\nClaw release\n"
-                           "Lift up\nLift down\nWait\nScore sequence",
+                           "Lift up\nLift down\nWait\nScore",
                            add_cb);
   lv_dropdown_set_text(g_dd_add, "+   Add step");
 
@@ -1701,6 +2151,43 @@ void build_live(lv_obj_t* scr) {
 
   make_button(card, 0, 190, COL_W, BTN_H - 4, "Clear trail", trail_btn_cb, 0, ink::CTRL,
               &lv_font_montserrat_12);
+}
+
+/// Debug console. Full width rather than the usual left-hand card: log lines
+/// are long, and wrapping them at 204 px would make the timestamps useless.
+void build_console(lv_obj_t* scr) {
+  lv_obj_t* root = make_root(scr);
+  g_root[static_cast<int>(View::CONSOLE)] = root;
+  lv_obj_add_flag(root, LV_OBJ_FLAG_HIDDEN);
+
+  lv_obj_t* card = lv_obj_create(root);
+  lv_obj_set_pos(card, CARD_X, CARD_Y);
+  lv_obj_set_size(card, SCREEN_W - 2 * CARD_X, CARD_H);
+  lv_obj_set_style_bg_color(card, lv_color_hex(ink::CARD), LV_PART_MAIN);
+  lv_obj_set_style_border_width(card, 1, LV_PART_MAIN);
+  lv_obj_set_style_border_color(card, lv_color_hex(ink::EDGE), LV_PART_MAIN);
+  lv_obj_set_style_radius(card, 10, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(card, CARD_PAD, LV_PART_MAIN);
+  lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+  make_header(card, "CONSOLE");
+
+  const int inner_w = SCREEN_W - 2 * CARD_X - 2 * CARD_PAD;
+  g_lbl_log_count = make_label(card, inner_w - 138, 8, "0 lines", ink::DIM, &lv_font_montserrat_12);
+  make_button(card, inner_w - 60, 0, 60, 24, "Clear", log_clear_cb, 0, ink::CTRL, &lv_font_montserrat_12);
+
+  lv_obj_t* pane = lv_obj_create(card);
+  lv_obj_set_pos(pane, 0, 32);
+  lv_obj_set_size(pane, inner_w, CARD_H - 2 * CARD_PAD - 32);
+  lv_obj_set_style_bg_color(pane, lv_color_hex(ink::SUNK), LV_PART_MAIN);
+  lv_obj_set_style_border_width(pane, 1, LV_PART_MAIN);
+  lv_obj_set_style_border_color(pane, lv_color_hex(ink::EDGE), LV_PART_MAIN);
+  lv_obj_set_style_radius(pane, 6, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(pane, 6, LV_PART_MAIN);
+  lv_obj_remove_flag(pane, LV_OBJ_FLAG_SCROLLABLE);
+
+  g_lbl_log = make_label(pane, 0, 0, "(nothing logged yet)", ink::TEXT, &lv_font_montserrat_12);
+  lv_obj_set_style_text_line_space(g_lbl_log, 2, LV_PART_MAIN);
 }
 
 // ---------------------------------------------------------------------------
@@ -1937,6 +2424,58 @@ void build_hud(lv_obj_t* scr) {
   g_hud_h = make_label(g_hud, VAL, 35, "0", ink::ACCENT, &lv_font_montserrat_14);
 }
 
+// ---------------------------------------------------------------------------
+// Boot-time port check
+//
+// Walks the manifest in subsystems.cpp and reports anything the brain cannot
+// see. This is the failure that costs matches: a motor knocked out of its port
+// between rounds looks exactly like a tuning problem from the driver station,
+// and it is invisible until the robot drives crooked.
+//
+// Probes with a throwaway device object rather than the real globals, because
+// the check has to name the port that is empty, and the globals are groups.
+// ---------------------------------------------------------------------------
+
+void device_check() {
+#ifdef LUCKYCATS_SIM
+  // No smart ports on a PC. Saying so beats a green "all present" that means
+  // nothing.
+  logf("port check skipped: simulator");
+  if (g_lbl_health != nullptr) {
+    lv_label_set_text(g_lbl_health, "simulated hardware");
+    lv_obj_set_style_text_color(g_lbl_health, lv_color_hex(ink::DIM), LV_PART_MAIN);
+  }
+#else
+  int missing = 0;
+  for (int i = 0; i < DEVICE_PORT_COUNT; ++i) {
+    const DevicePort& d = DEVICE_PORTS[i];
+    // The manifest carries the constructor's sign, which encodes reversal, not
+    // a port number. Ports themselves are 1-21.
+    const int p = (d.port < 0) ? -d.port : d.port;
+    bool ok = false;
+    switch (d.kind) {
+      case DevKind::MOTOR: ok = pros::Motor(static_cast<std::int8_t>(p)).is_installed(); break;
+      case DevKind::IMU: ok = pros::Imu(static_cast<std::uint8_t>(p)).is_installed(); break;
+      case DevKind::ROTATION: ok = pros::Rotation(static_cast<std::int8_t>(p)).is_installed(); break;
+    }
+    if (!ok) {
+      ++missing;
+      logf("port %2d MISSING: %s", p, d.name);
+    }
+  }
+
+  char msg[40];
+  if (missing == 0) std::snprintf(msg, sizeof(msg), "%d ports OK", DEVICE_PORT_COUNT);
+  else std::snprintf(msg, sizeof(msg), "%d of %d ports MISSING", missing, DEVICE_PORT_COUNT);
+  logf("%s", msg);
+
+  if (g_lbl_health != nullptr) {
+    lv_label_set_text(g_lbl_health, msg);
+    lv_obj_set_style_text_color(g_lbl_health, lv_color_hex(missing ? ink::RED : ink::GOOD), LV_PART_MAIN);
+  }
+#endif
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -1966,6 +2505,7 @@ void init() {
   build_select(scr);
   build_edit(scr);
   build_live(scr);
+  build_console(scr);
   build_hud(scr);
   build_blackout(scr);
   build_intro(scr);
@@ -1980,6 +2520,12 @@ void init() {
   sim_reset();
   intro_start();
   apply_blackout();
+
+  logf("boot: %s / %s", route_name(g_selected), mirrored() ? "BLUE" : "RED");
+  if (g_blackout) logf("blackout restored from save");
+  device_check();
+  logf("battery %.0f%%", pros::battery::get_capacity());
+  update_console();
 
   // Must be an lv_timer, not a pros::Task: LVGL is serviced by its own daemon
   // and touching widgets from another task races with it.
@@ -1998,6 +2544,39 @@ void toggle_record() { g_req_rec_toggle = true; }
 
 bool recording() { return g_recording; }
 
+void logf(const char* fmt, ...) {
+  const uint32_t head = g_log_head; // read once; ++ on a volatile is deprecated
+  char* dst = g_log[head % LOG_LINES];
+
+  // Timestamps are relative to program start, which is what matters when the
+  // question is "how long did that leg take", and they are what makes the
+  // console readable at a glance.
+  const uint32_t ms = pros::millis();
+  int p = std::snprintf(dst, LOG_COLS, "%3lu.%03lu  ", static_cast<unsigned long>(ms / 1000),
+                        static_cast<unsigned long>(ms % 1000));
+  if (p < 0) p = 0;
+  if (p < LOG_COLS - 1) {
+    va_list ap;
+    va_start(ap, fmt);
+    std::vsnprintf(dst + p, static_cast<size_t>(LOG_COLS - p), fmt, ap);
+    va_end(ap);
+  }
+  dst[LOG_COLS - 1] = '\0';
+
+  // Also out the wire, so `pros terminal` gets the full history rather than the
+  // last 64 lines the ring happens to be holding.
+  std::printf("%s\n", dst);
+
+  // Published last: a reader that samples head between these two statements
+  // sees the previous line, never a half-written one.
+  g_log_head = head + 1;
+}
+
+void log_clear() {
+  g_log_head = 0;
+  g_log_shown = 1; // force update_console to notice and repaint the empty state
+}
+
 void run_selected() {
   g_auton_active = true;
   show_live(); // watch the real robot track the plan
@@ -2006,7 +2585,11 @@ void run_selected() {
   start_pose(sx, sy, sth);
   chassis.setPose(sx, sy, sth);
 
+  const uint32_t t0 = pros::millis();
   const int n = step_count();
+  logf("auton: %s / %s", route_name(g_selected), mirrored() ? "BLUE" : "RED");
+  logf("start X %.1f Y %.1f H %.0f", static_cast<double>(sx), static_cast<double>(sy),
+       static_cast<double>(sth));
   for (int i = 0; i < n; ++i) {
     const Step s = step_at(i);
     switch (s.kind) {
@@ -2042,18 +2625,33 @@ void run_selected() {
         claw_pivot.move_absolute(s.a > 0.5f ? 0 : 400, 100);
         break;
       case Kind::LIFT:
-        lift.move_absolute(s.a * 900.0f, 100); // TODO: calibrate lift travel in ticks
+        lift.move_absolute(s.a * LIFT_TICKS, 100);
         break;
       case Kind::WAIT:
         pros::delay(static_cast<uint32_t>(s.a));
         break;
+      case Kind::SCORE:
+        // Front-to-back: the lift goes up, the rollers run backwards to push
+        // the load out of the rear, then the lift returns to travel height. The
+        // robot is already backed into the Goal by the DRIVE before this.
+        lift.move_absolute(s.a * LIFT_TICKS, 100);
+        pros::delay(SCORE_RAISE_MS);
+        intake.move(-127);
+        claw_spin.move(-127);
+        pros::delay(SCORE_EJECT_MS);
+        intake.move(0);
+        claw_spin.move(0);
+        lift.move_absolute(LIFT_TRAVEL * LIFT_TICKS, 100);
+        break;
     }
     chassis.waitUntilDone();
+    logf("%2d/%d  %s", i + 1, n, step_desc(s));
   }
 
   intake.move(0);
   claw_spin.move(0);
   g_auton_active = false;
+  logf("auton done in %lu ms", static_cast<unsigned long>(pros::millis() - t0));
 }
 
 } // namespace auton

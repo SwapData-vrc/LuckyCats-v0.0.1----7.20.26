@@ -26,6 +26,8 @@ replaced by stubs. So it answers:
 - are the touch targets reachable
 - does a route go where it was meant to go, in the right order
 - does the trail, recorder and telemetry logic behave
+- does a Goal get approached back-first, which is what front-to-back scoring
+  needs and what the step list cannot show you
 
 It cannot answer anything about the physical robot. Motion here is
 constant-rate with no PID, no boomerang and no slew, because a made-up plant
@@ -69,6 +71,11 @@ somewhere else.
 The selector persists its state. On the brain that is `/usd/auton.txt` on the SD
 card; here it is `luckycats_sim_auton.txt` in the build directory, switched by
 the `LUCKYCATS_SIM` define that `build.py` passes. Delete the file to reset.
+Editing it by hand is the quickest way to jump straight to a route or alliance
+without working the dropdowns.
+
+`LUCKYCATS_SIM` also skips the boot-time port check, which has nothing to probe
+here. The console says so rather than reporting everything present.
 
 The toolchain, the LVGL checkout and all object files live in
 `%LOCALAPPDATA%\LuckyCatsSim`, outside the project on purpose: the project sits

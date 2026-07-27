@@ -76,5 +76,25 @@ pros::Motor claw_pivot(9, pros::MotorGearset::green);        // open / close, hi
 pros::Motor claw_spin(11, pros::MotorGearset::green);      // claw roller: + grip, - release
 pros::Motor intake(12, pros::MotorGearset::blue);          // 600 rpm intake: + in, - out
 
+// ---------------------------------------------------------------------------
+// Port manifest, mirroring the constructors above. Read by the boot-time health
+// check in auton::init(). Ports are listed with the same sign as the
+// constructor argument so this reads as a copy of the wiring, not a paraphrase.
+//
+// The ADI encoder on 'C'/'D' is not a smart port and cannot be probed the same
+// way, so it is deliberately absent.
+// ---------------------------------------------------------------------------
 
-//TODO: code actual autons, add more subsystems
+const DevicePort DEVICE_PORTS[] = {
+    {"drive L1", -1, DevKind::MOTOR},  {"drive L2", 2, DevKind::MOTOR},
+    {"drive L3", -3, DevKind::MOTOR},  {"drive R1", 4, DevKind::MOTOR},
+    {"drive R2", -5, DevKind::MOTOR},  {"drive R3", 6, DevKind::MOTOR},
+    {"lift A", 7, DevKind::MOTOR},     {"lift B", -8, DevKind::MOTOR},
+    {"claw pivot", 9, DevKind::MOTOR}, {"claw spin", 11, DevKind::MOTOR},
+    {"intake", 12, DevKind::MOTOR},    {"imu", 10, DevKind::IMU},
+    {"horiz enc", 20, DevKind::ROTATION},
+};
+
+const int DEVICE_PORT_COUNT = static_cast<int>(sizeof(DEVICE_PORTS) / sizeof(DEVICE_PORTS[0]));
+
+//TODO: add more subsystems

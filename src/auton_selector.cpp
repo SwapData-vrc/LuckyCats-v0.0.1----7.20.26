@@ -1888,6 +1888,14 @@ void build_blackout(lv_obj_t* scr) {
 
   g_black_hint = make_label(g_black, 216, 146, "standby", ink::DIM, &lv_font_montserrat_14);
 
+  // Unhide, in the same corner as the eye icon that turned blackout on, so the
+  // two read as one switch. Low contrast on purpose: it has to be findable by
+  // someone who knows it is there without advertising that anything is hidden.
+  // Holding the badge still works as well, for when the corner is smudged.
+  lv_obj_t* unhide = make_button(g_black, 442, 6, 30, 22, LV_SYMBOL_EYE_OPEN, blackout_exit_cb, 0, ink::CARD,
+                                 &lv_font_montserrat_12);
+  lv_obj_set_style_border_color(unhide, lv_color_hex(ink::CARD), LV_PART_MAIN);
+
   lv_obj_add_flag(g_black, LV_OBJ_FLAG_HIDDEN);
 }
 

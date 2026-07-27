@@ -1,5 +1,6 @@
 #pragma once
 
+#include "autons.hpp"     // IWYU pragma: keep
 #include "field.hpp"      // IWYU pragma: keep
 #include "subsystems.hpp" // IWYU pragma: keep
 
@@ -13,6 +14,10 @@
  *   LIVE     real odometry telemetry, with a breadcrumb trail
  *   CONSOLE  scrolling debug log
  *
+ * This is the machinery. The routes themselves live in src/autons.cpp -- add
+ * one there and it appears in the dropdown, animates in the preview and runs
+ * in a match, with nothing to change here.
+ *
  * Routes are authored in the RED frame (red Alliance Station on the -X wall).
  * Selecting BLUE mirrors every route across the Y axis, so one route
  * definition drives both alliances.
@@ -23,35 +28,15 @@
  */
 namespace auton {
 
-/**
- * Route slots.
- *
- * The order here is the order of the ROUTE dropdown and the order of the
- * PRESETS table in auton_selector.cpp -- all three have to stay in step, and
- * CUSTOM has to stay last because everything before it indexes PRESETS.
- *
- * The saved-state file stores the route as its integer value, so inserting a
- * slot in the middle silently reinterprets a saved selection. Append instead,
- * or accept that the first boot after the change picks the wrong route.
- */
-enum class Route {
-  AWP = 0,            // the <SC8> Autonomous Win Point attempt
-  ALLIANCE_GOALS = 1, // both Alliance Goals, no midfield exposure
-  NORTH_QUAD = 2,     // neutral Short goal north, then the north Alliance Goal
-  SOUTH_QUAD = 3,     // mirror of NORTH_QUAD about the X axis
-  TALL_GOAL = 4,      // centre Tall Goal, full lift extension
-  SAFE = 5,           // grab what is in front, retreat -- never crosses centre
-  NONE = 6,           // sit still, for when the partner runs a full-field route
-  SKILLS = 7,         // 60 s programming skills
-  CUSTOM = 8,         // built on the brain, saved to the SD card
-};
-
-inline constexpr int ROUTE_COUNT = 9;
-
 /// Build the UI. Call once from initialize(), after chassis.calibrate().
 void init();
 
-Route selected();
+/// Index into AUTONS, or AUTON_COUNT for the hand-built Custom route.
+int selected();
+
+/// True when selected() means the Custom route rather than an entry in AUTONS.
+bool custom_selected();
+
 const char* selected_name();
 
 /// Which side the mirroring is resolved against. Never NEUTRAL.

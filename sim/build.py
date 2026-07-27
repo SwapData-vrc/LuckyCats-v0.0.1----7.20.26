@@ -60,6 +60,7 @@ def sources():
     # sim_hw.cpp replaces it, because real PROS devices need a brain.
     proj = [
         f"{PROJ}/src/auton_selector.cpp",
+        f"{PROJ}/src/autons.cpp",
         f"{PROJ}/src/field.cpp",
         f"{PROJ}/src/main.cpp",
         f"{PROJ}/src/field_img.c",

@@ -131,44 +131,14 @@ volatile uint32_t g_log_shown = 0; // head as of the last console repaint
 
 // ---------------------------------------------------------------------------
 // Route steps
+//
+// Kind, Step and the builders live in include/autons.hpp, because src/autons.cpp
+// is written against them and this file is not meant to be edited to add a
+// route. Everything here reads that vocabulary; nothing here defines it.
 // ---------------------------------------------------------------------------
 
-enum class Kind : uint8_t {
-  DRIVE,  // a = inches along current heading, negative reverses
-  TURN,   // a = absolute heading, degrees
-  GOTO,   // a,b = field point in inches; flag bit 0 = swerve
-  INTAKE, // a = +1 in, -1 out, 0 stop
-  CLAW,   // a = 1 close/grip, 0 open/release
-  LIFT,   // a = 0..1 target height
-  WAIT,   // a = milliseconds
-  SCORE,  // a = lift height 0..1; raise, eject off the back, return to travel
-};
-
-/// Where the lift sits while driving: clear of the field but not extended.
-constexpr float LIFT_TRAVEL = 0.15f;
-
-/// Encoder ticks for a full cascade extension. TODO: measure this. Every LIFT
-/// and SCORE height in every route is a fraction of it, so it is the single
-/// number that has to be right before any of them mean anything.
-constexpr float LIFT_TICKS = 900.0f;
-
-// This robot intakes at the front and scores off the back, so a Goal is
-// approached nose-out: GOTO a standoff point, TURN to put the back at the Goal,
-// DRIVE a negative distance into it, then SCORE. Every route below follows that
-// shape, and getting it backwards is the single easiest mistake to make here.
-
-/// GOTO modifier: without it the robot turns to the bearing first and then
-/// drives straight; with it the robot arcs to the point in one motion.
-constexpr uint8_t F_SWERVE = 1;
-
-struct Step {
-  Kind kind;
-  float a, b;
-  uint8_t flag;
-};
-
-/// Cap on the hand-built route only. The presets below are plain arrays and can
-/// be any length; skills in particular is far longer than this.
+/// Cap on the hand-built route only. Routes in AUTONS are plain arrays and can
+/// be any length.
 constexpr int MAX_STEPS = 20;
 
 struct RouteBuf {
@@ -211,236 +181,48 @@ const char* const START_OPTIONS = "Route default\nWest quadrant\nNorth quadrant\
                                   "South quadrant\nLoader +Y\nLoader -Y\nField centre";
 
 // ---------------------------------------------------------------------------
-// Presets, in the RED frame
+// Routes
 //
-// !! These are geometry, not tuning. Every coordinate comes from the estimated
-// tables in field.cpp, and none of it has been driven on a real field. Treat
-// each route as a starting shape to correct, not as something to trust in a
-// match. The lift heights in particular are guesses -- see the Status section
-// of README.md.
+// The routes themselves are in src/autons.cpp. This file only indexes them.
 //
-// Landmarks used below, all RED frame (red Alliance Station on the -X wall):
-//
-//   red Alliance Goal north  (-58,  30)   standoff (-42,  30), back at heading 90
-//   red Alliance Goal south  (-58, -30)   standoff (-42, -30), back at heading 90
-//   neutral Short, west      (-40,   0)   standoff (-26,   0), back at heading 90
-//   neutral Short, north     (  0,  40)   standoff (  0,  26), back at heading 180
-//   neutral Short, south     (  0, -40)   standoff (  0, -26), back at heading 0
-//   neutral Tall, centre     (  0,   0)   standoff (-16,   0), back at heading 270
-//   red Loader north         (-66,  54)   nose in from (-52, 54) at heading 270
-//
-// Heading convention: 0 faces +Y and increases clockwise, so 90 faces +X.
-// "Back at heading H" means the robot sits on H with its scoring side pointing
-// at the Goal, which is why the DRIVE that follows is always negative.
+// A selection is an int in [0, AUTON_COUNT]: below AUTON_COUNT it names an
+// entry in AUTONS, and AUTON_COUNT itself means the hand-built Custom route.
+// That keeps the dropdown, the saved file and this code using one number, and
+// it means AUTONS can be empty without a special case anywhere except the
+// dropdown text.
 // ---------------------------------------------------------------------------
 
-// The <SC8> attempt: three Goals fed off both Alliance Goals and the west
-// neutral Short. Ambitious for 15 s -- the estimate under the ROUTE dropdown
-// says how ambitious, and it is the first thing to check after any edit.
-// There is no room in 15 s for a detour: the sweep runs on the way to each
-// standoff, not as a separate waypoint. The estimate beside the ROUTE dropdown
-// is what this was cut down against, and it is still the tightest of the eight.
-constexpr Step P_AWP[] = {
-    {Kind::LIFT, LIFT_TRAVEL, 0, 0},
-    {Kind::INTAKE, 1.0f, 0, 0},
-    {Kind::GOTO, -42.0f, 30.0f, 0},
-    {Kind::TURN, 90.0f, 0, 0},
-    {Kind::DRIVE, -11.0f, 0, 0},
-    {Kind::SCORE, 0.45f, 0, 0}, // red Alliance Goal, north
-    {Kind::DRIVE, 8.0f, 0, 0},
-    {Kind::GOTO, -42.0f, -30.0f, 0},
-    {Kind::TURN, 90.0f, 0, 0},
-    {Kind::DRIVE, -11.0f, 0, 0},
-    {Kind::SCORE, 0.45f, 0, 0}, // red Alliance Goal, south
-    {Kind::DRIVE, 8.0f, 0, 0},
-    {Kind::GOTO, -26.0f, 0.0f, 0},
-    {Kind::TURN, 90.0f, 0, 0},
-    {Kind::DRIVE, -12.0f, 0, 0},
-    {Kind::SCORE, 0.30f, 0, 0}, // neutral Short, west quadrant -- third Goal
-    {Kind::DRIVE, 8.0f, 0, 0},
-    {Kind::INTAKE, 0.0f, 0, 0},
-};
+/// The selection value that means the hand-built route rather than an entry in
+/// AUTONS. It sits one past the end, so a plain int covers both cases.
+int custom_sel() { return AUTON_COUNT; }
 
-// Two Goals instead of three. Drops the neutral Short, which is the leg most
-// likely to run out of clock, and never leaves the west quadrant.
-constexpr Step P_ALLIANCE[] = {
-    {Kind::LIFT, LIFT_TRAVEL, 0, 0},
-    {Kind::INTAKE, 1.0f, 0, 0},
-    {Kind::GOTO, -36.0f, 24.0f, 0},
-    {Kind::GOTO, -42.0f, 30.0f, 0},
-    {Kind::TURN, 90.0f, 0, 0},
-    {Kind::DRIVE, -11.0f, 0, 0},
-    {Kind::SCORE, 0.45f, 0, 0},
-    {Kind::DRIVE, 9.0f, 0, 0},
-    {Kind::INTAKE, 1.0f, 0, 0},
-    {Kind::GOTO, -36.0f, -24.0f, 0},
-    {Kind::GOTO, -42.0f, -30.0f, 0},
-    {Kind::TURN, 90.0f, 0, 0},
-    {Kind::DRIVE, -11.0f, 0, 0},
-    {Kind::SCORE, 0.45f, 0, 0},
-    {Kind::DRIVE, 8.0f, 0, 0},
-    {Kind::INTAKE, 0.0f, 0, 0},
-};
+/// Dropdown text, built once at init from the names in AUTONS. lv_dropdown
+/// keeps the pointer when set with _static, so this has to outlive the widget --
+/// hence file scope rather than a local in build_select.
+char g_route_options[MAX_AUTONS * 24 + 24] = {};
 
-// Starts against the north wall. Neutral Short in the north quadrant first,
-// then across to the north Alliance Goal.
-constexpr Step P_NORTH[] = {
-    {Kind::LIFT, LIFT_TRAVEL, 0, 0},
-    {Kind::INTAKE, 1.0f, 0, 0},
-    {Kind::GOTO, -12.0f, 34.0f, 0},
-    {Kind::GOTO, 0.0f, 26.0f, 0},
-    {Kind::TURN, 180.0f, 0, 0},
-    {Kind::DRIVE, -11.0f, 0, 0},
-    {Kind::SCORE, 0.30f, 0, 0}, // neutral Short, north
-    {Kind::DRIVE, 9.0f, 0, 0},
-    {Kind::INTAKE, 1.0f, 0, 0},
-    {Kind::GOTO, -30.0f, 26.0f, 0},
-    {Kind::GOTO, -42.0f, 30.0f, 0},
-    {Kind::TURN, 90.0f, 0, 0},
-    {Kind::DRIVE, -11.0f, 0, 0},
-    {Kind::SCORE, 0.45f, 0, 0}, // red Alliance Goal, north
-    {Kind::DRIVE, 8.0f, 0, 0},
-    {Kind::INTAKE, 0.0f, 0, 0},
-};
-
-// P_NORTH reflected about the X axis. Not generated from it on purpose: the
-// alliance mirror already reflects about Y, and stacking a second automatic
-// reflection makes it very hard to reason about which route is running.
-constexpr Step P_SOUTH[] = {
-    {Kind::LIFT, LIFT_TRAVEL, 0, 0},
-    {Kind::INTAKE, 1.0f, 0, 0},
-    {Kind::GOTO, -12.0f, -34.0f, 0},
-    {Kind::GOTO, 0.0f, -26.0f, 0},
-    {Kind::TURN, 0.0f, 0, 0},
-    {Kind::DRIVE, -11.0f, 0, 0},
-    {Kind::SCORE, 0.30f, 0, 0}, // neutral Short, south
-    {Kind::DRIVE, 9.0f, 0, 0},
-    {Kind::INTAKE, 1.0f, 0, 0},
-    {Kind::GOTO, -30.0f, -26.0f, 0},
-    {Kind::GOTO, -42.0f, -30.0f, 0},
-    {Kind::TURN, 90.0f, 0, 0},
-    {Kind::DRIVE, -11.0f, 0, 0},
-    {Kind::SCORE, 0.45f, 0, 0}, // red Alliance Goal, south
-    {Kind::DRIVE, 8.0f, 0, 0},
-    {Kind::INTAKE, 0.0f, 0, 0},
-};
-
-// The centre Tall Goal, which needs most of the cascade. Few Pins, but it is
-// the only Goal worth contesting early and it leaves the robot in the midfield.
-constexpr Step P_TALL[] = {
-    {Kind::LIFT, LIFT_TRAVEL, 0, 0},
-    {Kind::INTAKE, 1.0f, 0, 0},
-    {Kind::GOTO, -30.0f, 0.0f, 0},
-    {Kind::INTAKE, 0.0f, 0, 0},
-    {Kind::LIFT, 0.80f, 0, 0}, // raise while still clear of the goal
-    {Kind::GOTO, -16.0f, 0.0f, 0},
-    {Kind::TURN, 270.0f, 0, 0},
-    {Kind::DRIVE, -6.0f, 0, 0},
-    {Kind::SCORE, 0.80f, 0, 0},
-    {Kind::DRIVE, 10.0f, 0, 0},
-    {Kind::LIFT, LIFT_TRAVEL, 0, 0},
-};
-
-// For an elimination partner who runs the whole field: take the Pins directly
-// in front, back off, and stay out of the way. Never crosses the centre.
-constexpr Step P_SAFE[] = {
-    {Kind::LIFT, LIFT_TRAVEL, 0, 0},
-    {Kind::INTAKE, 1.0f, 0, 0},
-    {Kind::DRIVE, 20.0f, 0, 0},
-    {Kind::WAIT, 400.0f, 0, 0},
-    {Kind::INTAKE, 0.0f, 0, 0},
-    {Kind::DRIVE, -14.0f, 0, 0},
-};
-
-// Genuinely doing nothing is a real choice, and it is safer to pick it here
-// than to leave a route selected and hope nobody presses run.
-constexpr Step P_NONE[] = {{Kind::WAIT, 250.0f, 0, 0}};
-
-// 60 s skills. Both Alliance Goals twice via the north Loader, both reachable
-// neutral Shorts, then the Tall Goal to finish.
-constexpr Step P_SKILLS[] = {
-    {Kind::LIFT, LIFT_TRAVEL, 0, 0},
-    {Kind::INTAKE, 1.0f, 0, 0},
-    {Kind::GOTO, -34.0f, 24.0f, 0},
-    {Kind::GOTO, -42.0f, 30.0f, 0},
-    {Kind::TURN, 90.0f, 0, 0},
-    {Kind::DRIVE, -11.0f, 0, 0},
-    {Kind::SCORE, 0.45f, 0, 0}, // Alliance Goal north, load 1
-    {Kind::DRIVE, 9.0f, 0, 0},
-    // reload at the north Loader: nose in, this is the intake side
-    {Kind::GOTO, -52.0f, 54.0f, 0},
-    {Kind::TURN, 270.0f, 0, 0},
-    {Kind::INTAKE, 1.0f, 0, 0},
-    {Kind::DRIVE, 8.0f, 0, 0},
-    {Kind::WAIT, 700.0f, 0, 0},
-    {Kind::DRIVE, -8.0f, 0, 0},
-    {Kind::GOTO, -42.0f, 30.0f, 0},
-    {Kind::TURN, 90.0f, 0, 0},
-    {Kind::DRIVE, -11.0f, 0, 0},
-    {Kind::SCORE, 0.45f, 0, 0}, // Alliance Goal north, load 2
-    {Kind::DRIVE, 9.0f, 0, 0},
-    {Kind::INTAKE, 1.0f, 0, 0},
-    {Kind::GOTO, -34.0f, -24.0f, 0},
-    {Kind::GOTO, -42.0f, -30.0f, 0},
-    {Kind::TURN, 90.0f, 0, 0},
-    {Kind::DRIVE, -11.0f, 0, 0},
-    {Kind::SCORE, 0.45f, 0, 0}, // Alliance Goal south
-    {Kind::DRIVE, 9.0f, 0, 0},
-    {Kind::INTAKE, 1.0f, 0, 0},
-    {Kind::GOTO, -26.0f, 0.0f, 0},
-    {Kind::TURN, 90.0f, 0, 0},
-    {Kind::DRIVE, -12.0f, 0, 0},
-    {Kind::SCORE, 0.30f, 0, 0}, // neutral Short, west
-    {Kind::DRIVE, 9.0f, 0, 0},
-    {Kind::INTAKE, 1.0f, 0, 0},
-    {Kind::GOTO, 0.0f, -26.0f, 0},
-    {Kind::TURN, 0.0f, 0, 0},
-    {Kind::DRIVE, -11.0f, 0, 0},
-    {Kind::SCORE, 0.30f, 0, 0}, // neutral Short, south
-    {Kind::DRIVE, 9.0f, 0, 0},
-    {Kind::INTAKE, 0.0f, 0, 0},
-    {Kind::LIFT, 0.80f, 0, 0},
-    {Kind::GOTO, -16.0f, 0.0f, 0},
-    {Kind::TURN, 270.0f, 0, 0},
-    {Kind::DRIVE, -6.0f, 0, 0},
-    {Kind::SCORE, 0.80f, 0, 0}, // Tall Goal
-    {Kind::DRIVE, 10.0f, 0, 0},
-    {Kind::LIFT, LIFT_TRAVEL, 0, 0},
-};
-
-struct Preset {
-  const char* name;
-  const Step* s;
-  int n;
-  float sx, sy, sth; // start pose used when the start dropdown says "default"
-};
-
-/// N(a) is only correct because every preset is a plain array in this file.
-#define ROUTE_N(a) (static_cast<int>(sizeof(a) / sizeof((a)[0])))
-
-// Order must match enum Route in auton_selector.hpp and ROUTE_OPTIONS below.
-const Preset PRESETS[ROUTE_COUNT - 1] = {
-    {"AWP - 3 goals", P_AWP, ROUTE_N(P_AWP), -52.0f, 8.0f, 90.0f},
-    {"Alliance goals", P_ALLIANCE, ROUTE_N(P_ALLIANCE), -52.0f, 8.0f, 90.0f},
-    {"North quadrant", P_NORTH, ROUTE_N(P_NORTH), 0.0f, 52.0f, 180.0f},
-    {"South quadrant", P_SOUTH, ROUTE_N(P_SOUTH), 0.0f, -52.0f, 0.0f},
-    {"Tall goal", P_TALL, ROUTE_N(P_TALL), -52.0f, 0.0f, 90.0f},
-    {"Safe - hold side", P_SAFE, ROUTE_N(P_SAFE), -52.0f, 0.0f, 90.0f},
-    {"Do nothing", P_NONE, ROUTE_N(P_NONE), -52.0f, 0.0f, 90.0f},
-    {"Skills (60 s)", P_SKILLS, ROUTE_N(P_SKILLS), -52.0f, 8.0f, 90.0f},
-};
-
-#undef ROUTE_N
-
-const char* const ROUTE_OPTIONS = "AWP - 3 goals\nAlliance goals\nNorth quadrant\nSouth quadrant\n"
-                                  "Tall goal\nSafe - hold side\nDo nothing\nSkills (60 s)\nCustom route";
+void build_route_options() {
+  int p = 0;
+  for (int i = 0; i < AUTON_COUNT && i < MAX_AUTONS; ++i) {
+    const int left = static_cast<int>(sizeof(g_route_options)) - p;
+    if (left <= 1) break;
+    p += std::snprintf(g_route_options + p, static_cast<size_t>(left), "%s\n", AUTONS[i].name);
+    if (p >= static_cast<int>(sizeof(g_route_options))) {
+      p = static_cast<int>(sizeof(g_route_options)) - 1; // snprintf truncated
+      break;
+    }
+  }
+  std::snprintf(g_route_options + p, sizeof(g_route_options) - static_cast<size_t>(p), "Custom route");
+}
 
 // The custom route. RAM only -- never written to flash, so it is gone on power
 // cycle. It is kept after a run so you can re-run the same test.
 RouteBuf g_custom{{}, 0};
 float g_custom_start[3] = {-52.0f, 0.0f, 90.0f};
 
-Route g_selected = Route::AWP;
+/// Index into AUTONS, or custom_sel() for the hand-built route. Starts on the
+/// first route if there is one; with an empty AUTONS that is Custom.
+int g_selected = 0;
 field::Alliance g_alliance = field::Alliance::RED;
 int g_start_sel = 0;
 
@@ -449,13 +231,11 @@ int g_start_sel = 0;
 /// purpose: a brownout mid-event must not come back up revealing everything.
 bool g_blackout = false;
 
-int step_count() {
-  return (g_selected == Route::CUSTOM) ? g_custom.n : PRESETS[static_cast<int>(g_selected)].n;
-}
+bool is_custom() { return g_selected >= AUTON_COUNT; }
 
-const Step* raw_step_at(int i) {
-  return (g_selected == Route::CUSTOM) ? &g_custom.s[i] : &PRESETS[static_cast<int>(g_selected)].s[i];
-}
+int step_count() { return is_custom() ? g_custom.n : AUTONS[g_selected].count; }
+
+const Step* raw_step_at(int i) { return is_custom() ? &g_custom.s[i] : &AUTONS[g_selected].steps[i]; }
 
 bool mirrored() { return g_alliance == field::Alliance::BLUE; }
 
@@ -475,15 +255,15 @@ Step step_at(int i) {
 
 void start_pose(float& x, float& y, float& th) {
   if (g_start_sel == 0) {
-    if (g_selected == Route::CUSTOM) {
+    if (is_custom()) {
       x = g_custom_start[0];
       y = g_custom_start[1];
       th = g_custom_start[2];
     } else {
-      const Preset& p = PRESETS[static_cast<int>(g_selected)];
-      x = p.sx;
-      y = p.sy;
-      th = p.sth;
+      const Auton& a = AUTONS[g_selected];
+      x = a.start_x;
+      y = a.start_y;
+      th = a.start_heading;
     }
   } else {
     const Start& s = STARTS[g_start_sel];
@@ -564,6 +344,7 @@ const char* kind_tag(Kind k) {
     case Kind::LIFT: return "LIFT";
     case Kind::WAIT: return "WAIT";
     case Kind::SCORE: return "SCORE";
+    case Kind::CALL: return "CALL";
   }
   return "WAIT";
 }
@@ -575,7 +356,8 @@ bool kind_from_tag(const char* s, Kind& out) {
   };
   static const Row rows[] = {{"DRIVE", Kind::DRIVE}, {"TURN", Kind::TURN},     {"GOTO", Kind::GOTO},
                              {"INTAKE", Kind::INTAKE}, {"CLAW", Kind::CLAW}, {"LIFT", Kind::LIFT},
-                             {"WAIT", Kind::WAIT},     {"SCORE", Kind::SCORE}};
+                             {"WAIT", Kind::WAIT},     {"SCORE", Kind::SCORE},
+                             {"CALL", Kind::CALL}};
   for (const Row& r : rows) {
     if (std::strcmp(r.tag, s) == 0) {
       out = r.k;
@@ -632,7 +414,7 @@ void load_saved() {
     if (std::sscanf(p, "alliance %d", &iv) == 1) {
       g_alliance = iv ? field::Alliance::BLUE : field::Alliance::RED;
     } else if (std::sscanf(p, "route %d", &iv) == 1) {
-      if (iv >= 0 && iv < ROUTE_COUNT) g_selected = static_cast<Route>(iv);
+      if (iv >= 0 && iv <= AUTON_COUNT) g_selected = iv;
     } else if (std::sscanf(p, "start %d", &iv) == 1) {
       if (iv >= 0 && iv < START_COUNT) g_start_sel = iv;
     } else if (std::sscanf(p, "blackout %d", &iv) == 1) {
@@ -652,7 +434,7 @@ void load_saved() {
 
   // A saved CUSTOM selection with nothing in it would leave the user staring at
   // an empty preview with no obvious cause.
-  if (g_selected == Route::CUSTOM && g_custom.n == 0) g_selected = Route::AWP;
+  if (is_custom() && g_custom.n == 0) g_selected = 0;
 }
 
 /// Note a change without writing yet. Every tap would otherwise hit the SD card
@@ -691,6 +473,7 @@ void step_text(const Step& s, char* out, int n) {
     case Kind::LIFT: std::snprintf(out, n, "Lift    %.0f%%", static_cast<double>(s.a * 100.0f)); break;
     case Kind::WAIT: std::snprintf(out, n, "Wait    %.0f ms", static_cast<double>(s.a)); break;
     case Kind::SCORE: std::snprintf(out, n, "Score   at %.0f%%", static_cast<double>(s.a * 100.0f)); break;
+    case Kind::CALL: std::snprintf(out, n, "Call    action %d", static_cast<int>(s.a)); break;
   }
 }
 
@@ -847,6 +630,12 @@ void begin_step() {
       set_leg(g_sim.x, g_sim.y, g_sim.th, SCORE_RAISE_MS);
       g_sim.lift_to = s.a; // after set_leg, which resets it
       break;
+    case Kind::CALL:
+      // The preview cannot see inside an action, so it holds still for however
+      // long the route said the action takes and shows nothing happening. That
+      // is honest -- a guess at what the function does would be worse.
+      set_leg(g_sim.x, g_sim.y, g_sim.th, static_cast<uint32_t>(s.b));
+      break;
   }
 }
 
@@ -863,7 +652,7 @@ void begin_step() {
 uint32_t g_route_ms = 0;
 
 /// Match autonomous is 15 s; programming skills is a minute.
-uint32_t budget_ms() { return (g_selected == Route::SKILLS) ? 60000u : 15000u; }
+uint32_t budget_ms() { return is_custom() ? 15000u : AUTONS[g_selected].budget_ms; }
 
 uint32_t route_ms() {
   float x, y, th;
@@ -908,6 +697,7 @@ uint32_t route_ms() {
       case Kind::LIFT: break;
       case Kind::WAIT: total += static_cast<uint32_t>(s.a); break;
       case Kind::SCORE: total += SCORE_RAISE_MS + SCORE_EJECT_MS; break;
+      case Kind::CALL: total += static_cast<uint32_t>(s.b); break;
     }
   }
   return total;
@@ -1082,7 +872,7 @@ void recording_commit() {
   for (int i = 0; i < g_rec_n && g_custom.n < MAX_STEPS; ++i)
     g_custom.s[g_custom.n++] = Step{Kind::GOTO, g_rec[i].x * sgn, g_rec[i].y, 0};
 
-  g_selected = Route::CUSTOM;
+  g_selected = custom_sel();
 }
 
 void live_sample() {
@@ -1211,8 +1001,9 @@ bool g_bg_ready = false;
 const void* const FIELD_IMAGE_SRC = &field_img;
 
 bool draw_field_image(lv_layer_t* l) {
-  if (FIELD_IMAGE_SRC == nullptr) return false;
-
+  // No null check on FIELD_IMAGE_SRC: it is the address of a linked-in object,
+  // so it can never be null and the compiler says so. The decoder call below is
+  // the real guard -- it fails if the art is missing or malformed.
   lv_image_header_t hdr;
   if (lv_image_decoder_get_info(FIELD_IMAGE_SRC, &hdr) != LV_RESULT_OK) return false;
   if (hdr.w != field::PX || hdr.h != field::PX) return false;
@@ -1357,9 +1148,9 @@ void build_blackout(lv_obj_t* scr);
 void build_hud(lv_obj_t* scr);
 void update_hud();
 
-const char* route_name(Route r) {
-  if (r == Route::CUSTOM) return "Custom route";
-  return PRESETS[static_cast<int>(r)].name;
+const char* route_name(int r) {
+  if (r < 0 || r >= AUTON_COUNT) return "Custom route";
+  return AUTONS[r].name;
 }
 
 /// The console and the landing page are the two views that own the full width,
@@ -1609,7 +1400,7 @@ void alliance_cb(lv_event_t* e) {
 
 void route_cb(lv_event_t* e) {
   const uint32_t i = lv_dropdown_get_selected(lv_event_get_target_obj(e));
-  g_selected = static_cast<Route>(i < ROUTE_COUNT ? i : 0);
+  g_selected = (static_cast<int>(i) <= AUTON_COUNT) ? static_cast<int>(i) : custom_sel();
   g_robot_selected = false;
   restart_preview();
   logf("route %s  %d steps  ~%.1f s", route_name(g_selected), step_count(),
@@ -1691,6 +1482,9 @@ void step_cb(lv_event_t* e) {
     case Kind::LIFT: s.a = (s.a >= 0.79f) ? 0.0f : s.a + 0.4f; break;
     case Kind::WAIT: s.a = (s.a >= 1900.0f) ? 250.0f : s.a * 2.0f; break;
     case Kind::SCORE: s.a = (s.a >= 0.79f) ? 0.30f : s.a + 0.15f; break;
+    // CALL indexes a function; there is nothing sensible to cycle it through,
+    // and silently pointing it at a different action would be worse than inert.
+    case Kind::CALL: break;
   }
   restart_preview();
 }
@@ -1776,8 +1570,8 @@ void canvas_cb(lv_event_t*) {
   // tap elsewhere in the editor -> drop a waypoint. Points are stored in the
   // RED frame so the blue mirror stays correct.
   if (g_view == View::EDIT) {
-    g_selected = Route::CUSTOM;
-    lv_dropdown_set_selected(g_dd_route, static_cast<uint32_t>(Route::CUSTOM));
+    g_selected = custom_sel();
+    lv_dropdown_set_selected(g_dd_route, static_cast<uint32_t>(custom_sel()));
     push_step(Kind::GOTO, mirrored() ? -ix : ix, iy);
     return;
   }
@@ -1805,7 +1599,7 @@ void anim_cb(lv_timer_t*) {
       g_recording = false;
       if (g_rec_n >= 2) {
         recording_commit();
-        lv_dropdown_set_selected(g_dd_route, static_cast<uint32_t>(Route::CUSTOM));
+        lv_dropdown_set_selected(g_dd_route, static_cast<uint32_t>(custom_sel()));
         refresh_steps();
         logf("recorded %d waypoints into Custom", g_custom.n);
       } else {
@@ -2060,7 +1854,7 @@ void build_select(lv_obj_t* scr) {
   g_lbl_est = make_label(card, 84, 80, "", ink::DIM, &lv_font_montserrat_10);
   lv_obj_set_width(g_lbl_est, COL_W - 84);
   lv_obj_set_style_text_align(g_lbl_est, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
-  g_dd_route = make_dropdown(card, 0, 92, COL_W, ROUTE_OPTIONS, route_cb);
+  g_dd_route = make_dropdown(card, 0, 92, COL_W, g_route_options, route_cb);
 
   make_caption(card, 2, 128, "START");
   g_dd_start = make_dropdown(card, 0, 140, COL_W, START_OPTIONS, start_cb);
@@ -2488,9 +2282,14 @@ void init() {
   lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-  // Before any widget exists, so the dropdowns can be built already showing
-  // what was chosen last time rather than flickering to it afterwards.
+  // Both before any widget exists: the route dropdown is built from the names
+  // in AUTONS, and it should come up already showing what was chosen last time
+  // rather than flickering to it afterwards.
+  build_route_options();
   load_saved();
+  // An empty AUTONS, or a saved index pointing past a route that has since been
+  // deleted, both land on Custom rather than reading off the end of the table.
+  if (g_selected < 0 || g_selected > AUTON_COUNT) g_selected = custom_sel();
 
   // ---- field preview, shared by every view except the landing page ----
   g_canvas = lv_canvas_create(scr);
@@ -2532,7 +2331,9 @@ void init() {
   lv_timer_create(anim_cb, FRAME_MS, nullptr);
 }
 
-Route selected() { return g_selected; }
+int selected() { return g_selected; }
+
+bool custom_selected() { return g_selected >= AUTON_COUNT; }
 
 const char* selected_name() { return route_name(g_selected); }
 
@@ -2643,6 +2444,14 @@ void run_selected() {
         claw_spin.move(0);
         lift.move_absolute(LIFT_TRAVEL * LIFT_TICKS, 100);
         break;
+      case Kind::CALL: {
+        // Bounds-checked and null-checked: a route outliving the action it
+        // called must not take the robot down with it mid-match.
+        const int idx = static_cast<int>(s.a);
+        if (idx >= 0 && idx < ACTION_COUNT && ACTIONS[idx] != nullptr) ACTIONS[idx]();
+        else logf("  CALL %d has no action", idx);
+        break;
+      }
     }
     chassis.waitUntilDone();
     logf("%2d/%d  %s", i + 1, n, step_desc(s));

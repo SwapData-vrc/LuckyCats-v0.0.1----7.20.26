@@ -60,7 +60,12 @@ the selector just runs with defaults.
 The eye icon on the landing page replaces the screen with an idle-looking logo
 page, so a team scouting the pit cannot read the selected route off the brain.
 The route still runs normally, and autonomous starting will not reveal it.
-**Hold the badge** for about half a second to leave.
+
+To leave, tap the eye icon again — it sits in the same corner on the standby
+screen. Holding the badge for about half a second also works.
+
+The state is saved, so a brownout mid-event comes back up still hidden. If the
+brain looks idle when you expect the selector, that is why.
 
 ## Simulator
 

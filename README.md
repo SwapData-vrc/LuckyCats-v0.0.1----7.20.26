@@ -32,13 +32,35 @@ pros mu            # both, then open the terminal
 
 ## Touchscreen
 
-Four screens, driven by touch on the brain:
+A short title sequence plays at boot; touch anywhere to skip it. It is driven by
+the UI timer, not a sleep, so it never delays autonomous starting.
+
+Four screens after that:
 
 - **Landing** — team badge, version, and the way into the other three
-- **Run** — pick alliance, route and start position; the field preview draws the
-  robot at the chosen start pose
+- **Run** — pick alliance, route and start position; the field preview animates
+  the route, and X / Y / heading are shown over the field
 - **Design** — tap the field to drop waypoints and build a route by hand
 - **Live** — odometry readout, battery, and route recording
+
+On the field itself:
+
+- **Tap a Toggle** to start the route from that quadrant. The robot slides to
+  the new start pose and the START dropdown follows.
+- **Hold a Toggle** to cycle which alliance owns that quadrant. Preview only —
+  it does not change what the robot does.
+
+The selection survives a reboot: alliance, route, start, blackout state and the
+whole custom route are written to `/usd/auton.txt` on the SD card. It is plain
+text and safe to edit on a laptop; delete it to reset. With no SD card inserted
+the selector just runs with defaults.
+
+### Blackout Mode
+
+The eye icon on the landing page replaces the screen with an idle-looking logo
+page, so a team scouting the pit cannot read the selected route off the brain.
+The route still runs normally, and autonomous starting will not reveal it.
+**Hold the badge** for about half a second to leave.
 
 ## Simulator
 

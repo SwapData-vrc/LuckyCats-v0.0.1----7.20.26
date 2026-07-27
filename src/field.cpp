@@ -30,6 +30,7 @@ constexpr uint32_t GOAL_N = 0xb9c2cc; // neutral goal
 constexpr uint32_t GOAL_DK = 0x6b737c;
 constexpr uint32_t LOADER = 0x2f3742;
 constexpr uint32_t SHADOW = 0x000000;
+constexpr uint32_t SELECT = 0x4cc9f0; // matches ink::ACCENT in auton_selector
 } // namespace col
 
 // --- Goals: 4 neutral Short, 1 neutral Tall, 2 red Alliance, 2 blue Alliance
@@ -270,27 +271,41 @@ void draw_quadrant_wash(lv_layer_t* l) {
 
 } // namespace
 
-// Toggles are small rollers set into the wall. Colour follows the owner.
-void draw_toggles(lv_layer_t* l) {
+// Toggles are rollers set into the wall. Colour follows the owner. They double
+// as the quadrant picker, so they are drawn well over scale -- see the note on
+// TOGGLE_LONG_IN in field.hpp.
+void draw_toggles(lv_layer_t* l, int highlight, float pulse) {
   draw_quadrant_wash(l);
 
   for (const Toggle& t : toggles) {
-    const Alliance a = toggle_owner[static_cast<int>(t.quadrant)];
+    const int qi = static_cast<int>(t.quadrant);
+    const Alliance a = toggle_owner[qi];
     uint32_t c = col::YELLOW;
     if (a == Alliance::RED) c = col::RED;
     else if (a == Alliance::BLUE) c = col::BLUE;
 
     const float x = px_x(t.x), y = px_y(t.y);
-    const float lng = 3.6f * PX_PER_IN, thk = 1.2f * PX_PER_IN;
+    const float lng = TOGGLE_LONG_IN * PX_PER_IN, thk = TOGGLE_THICK_IN * PX_PER_IN;
     const float w = t.horizontal ? lng : thk;
     const float h = t.horizontal ? thk : lng;
 
-    draw::rect(l, x - w, y - h, x + w, y + h, 0x14181d, LV_OPA_COVER, 2);
-    draw::rect(l, x - w + 1, y - h + 1, x + w - 1, y + h - 1, c, LV_OPA_COVER, 2);
+    // chosen-start halo, breathing so it reads as live rather than painted on
+    if (qi == highlight) {
+      const float grow = 3.0f + 4.0f * pulse;
+      draw::rect(l, x - w - grow, y - h - grow, x + w + grow, y + h + grow, col::SELECT, LV_OPA_30, 6);
+      draw::rect_outline(l, x - w - grow, y - h - grow, x + w + grow, y + h + grow, col::SELECT, 2,
+                         LV_OPA_80, 6);
+    }
 
-    // one centre rib, so it reads as a spinnable roller rather than a flat bar
-    if (t.horizontal) draw::line(l, x, y - h + 1, x, y + h - 1, 0x14181d, 1, LV_OPA_60);
-    else draw::line(l, x - w + 1, y, x + w - 1, y, 0x14181d, 1, LV_OPA_60);
+    draw::rect(l, x - w, y - h, x + w, y + h, 0x14181d, LV_OPA_COVER, 3);
+    draw::rect(l, x - w + 1.5f, y - h + 1.5f, x + w - 1.5f, y + h - 1.5f, c, LV_OPA_COVER, 3);
+
+    // ribs, so it reads as a spinnable roller rather than a flat bar
+    for (int r = -1; r <= 1; ++r) {
+      const float f = static_cast<float>(r) * 0.45f;
+      if (t.horizontal) draw::line(l, x + w * f, y - h + 2, x + w * f, y + h - 2, 0x14181d, 1, LV_OPA_50);
+      else draw::line(l, x - w + 2, y + h * f, x + w - 2, y + h * f, 0x14181d, 1, LV_OPA_50);
+    }
   }
 }
 

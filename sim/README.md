@@ -38,6 +38,9 @@ hardware-only.** A route that looks perfect here can still drive badly.
 | | |
 |---|---|
 | Mouse | touchscreen |
+| Tap a Toggle | start the route from that quadrant; the robot slides there |
+| Hold a Toggle | cycle who owns that quadrant (preview only) |
+| Hold the badge | leave Blackout Mode |
 | F1 | run `autonomous()` |
 | F2 | run `opcontrol()` |
 | W / S | left stick, during opcontrol |
@@ -62,6 +65,10 @@ somewhere else.
 | `shim/liblvgl/lvgl.h` | redirects to the upstream LVGL checkout |
 | `sim_hw.cpp` | stub implementations, robot model, and the hardware globals that replace `src/subsystems.cpp` |
 | `sim_main.cpp` | window, main loop, competition-mode keys |
+
+The selector persists its state. On the brain that is `/usd/auton.txt` on the SD
+card; here it is `luckycats_sim_auton.txt` in the build directory, switched by
+the `LUCKYCATS_SIM` define that `build.py` passes. Delete the file to reset.
 
 The toolchain, the LVGL checkout and all object files live in
 `%LOCALAPPDATA%\LuckyCatsSim`, outside the project on purpose: the project sits

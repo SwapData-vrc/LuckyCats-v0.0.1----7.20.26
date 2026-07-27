@@ -109,6 +109,17 @@ struct Toggle {
 
 extern const Toggle toggles[4];
 
+/// Half-extents of a drawn Toggle, in inches. Sized for a fingertip rather than
+/// to scale: on a 232 px field a true-size roller is about 4 px, which is not
+/// selectable on a resistive touchscreen with a glove on.
+constexpr float TOGGLE_LONG_IN = 7.0f;
+constexpr float TOGGLE_THICK_IN = 2.6f;
+
+/// Tap radius for "the user meant this Toggle", in inches. Deliberately much
+/// larger than the drawn art -- misses are far more annoying than overshoot,
+/// and nothing else on the field competes for this area.
+constexpr float TOGGLE_HIT_IN = 17.0f;
+
 struct Loader {
   float x, y;
   Alliance alliance;
@@ -125,6 +136,9 @@ void draw_field_static(lv_layer_t* l);
 
 /// Toggles, plus a wash over each quadrant showing who owns it. Separate from
 /// the static art because flipping a toggle changes both.
-void draw_toggles(lv_layer_t* l);
+///
+/// highlight is a Quad index, or -1 for none: that quadrant is drawn as the
+/// currently chosen start, with a ring whose radius follows `pulse` (0..1).
+void draw_toggles(lv_layer_t* l, int highlight = -1, float pulse = 0.0f);
 
 } // namespace field

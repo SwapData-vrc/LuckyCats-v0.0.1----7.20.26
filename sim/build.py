@@ -36,7 +36,9 @@ PROJ = os.path.dirname(HERE)
 INCLUDES = [f"-I{HERE}", f"-I{HERE}/shim", f"-I{LVGL}", f"-I{PROJ}/include"]
 
 WARN = ["-Wall", "-Wextra", "-Wno-unused-parameter", "-Wno-missing-field-initializers"]
-COMMON = ["-O1", "-g", "-DLV_CONF_INCLUDE_SIMPLE"] + WARN + INCLUDES
+# LUCKYCATS_SIM lets robot code tell the two builds apart. Only persistence uses
+# it so far: the brain saves to /usd on the SD card, which does not exist here.
+COMMON = ["-O1", "-g", "-DLV_CONF_INCLUDE_SIMPLE", "-DLUCKYCATS_SIM"] + WARN + INCLUDES
 CXXFLAGS = COMMON + ["-std=gnu++20"]
 CFLAGS = COMMON + ["-std=gnu11"]
 

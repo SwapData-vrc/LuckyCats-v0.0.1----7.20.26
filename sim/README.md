@@ -108,9 +108,25 @@ simulator should do with that call rather than silently pretending.
 
 ## Include style
 
-`include/field.hpp` and `include/subsystems.hpp` use angle brackets for
-`liblvgl`, `main.h` and `lemlib`. Quoted includes search the including file's
-own directory first, which would always find PROS's copies sitting next to
-those headers, leaving no way for the simulator to substitute its own. The
-project `Makefile` adds `-I$(INCDIR)` to `EXTRA_CFLAGS`/`EXTRA_CXXFLAGS` so the
-brain build still resolves them -- `common.mk` only passes `-iquote`.
+`include/field.hpp` and `include/subsystems.hpp` include `liblvgl`, `main.h`
+and `lemlib` two ways:
+
+```cpp
+#ifdef LUCKYCATS_SIM
+#include <liblvgl/lvgl.h>
+#else
+#include "liblvgl/lvgl.h"
+#endif
+```
+
+Angle brackets for the simulator, because a quoted include searches the
+including header's own directory first and would always find the PROS copy
+sitting next to it -- leaving no way to substitute the stub by `-I` order.
+
+Quoted for the brain, because `common.mk` puts `include/` on the path with
+`-iquote` only. Angle brackets there needed `-I$(INCDIR)` added to
+`EXTRA_CXXFLAGS` by hand, and the `compile_commands.json` PROS generates for
+clangd does not carry that flag -- so the build was fine while every editor
+reported unresolved includes in `main.cpp` and `subsystems.cpp`. The `#ifdef`
+is uglier than one line, and it is the reason the project now compiles with
+stock PROS flags.

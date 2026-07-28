@@ -14,6 +14,8 @@
 
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
+#include <string>
 #include <thread>
 
 #define WIN32_LEAN_AND_MEAN
@@ -98,7 +100,23 @@ void banner() {
 
 } // namespace
 
-int main() {
+// Run autonomous() or opcontrol() without a keystroke.
+//
+// F1 and F2 are read with GetAsyncKeyState gated on window focus, which means
+// they cannot be driven by a script -- Windows blocks a background process from
+// taking the foreground, so the executor could not be tested automatically at
+// all. These flags exist so it can be.
+int main(int argc, char** argv) {
+  bool auto_auton = false, auto_opcontrol = false;
+  int quit_after_ms = 0;
+  for (int i = 1; i < argc; ++i) {
+    const std::string a = argv[i];
+    if (a == "--auton") auto_auton = true;
+    else if (a == "--opcontrol") auto_opcontrol = true;
+    else if (a.rfind("--quit-after=", 0) == 0) quit_after_ms = std::atoi(a.c_str() + 13);
+    else std::printf("[sim] unknown option %s\n", a.c_str());
+  }
+
   banner();
 
   lv_init();
@@ -115,8 +133,12 @@ int main() {
   // Same order as the brain: calibrate, then build the UI.
   initialize();
 
+  if (auto_auton) start_autonomous();
+  if (auto_opcontrol) start_opcontrol();
+
   bool p_f1 = false, p_f2 = false, p_esc = false;
   auto last = std::chrono::steady_clock::now();
+  const auto started = last;
 
   while (true) {
     const auto now = std::chrono::steady_clock::now();
@@ -128,6 +150,10 @@ int main() {
     if (edge(VK_F1, p_f1)) start_autonomous();
     if (edge(VK_F2, p_f2)) start_opcontrol();
     if (edge(VK_ESCAPE, p_esc)) break;
+
+    if (quit_after_ms > 0 &&
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - started).count() >= quit_after_ms)
+      break;
 
     const uint32_t wait = lv_timer_handler();
     Sleep(wait == LV_NO_TIMER_READY ? 5 : (wait > 20 ? 20 : wait));

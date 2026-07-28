@@ -93,10 +93,14 @@ void opcontrol() {
     if (master.get_digital(pros::E_CONTROLLER_DIGITAL_R1)) {
       intake.move(127);
       claw_spin.move(127);
-    } else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_R2)) {
+    } 
+    
+    else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_R2)) {
       intake.move(-127);
-      claw_spin.move(-127);
-    } else {
+             claw_spin.move(-127);
+    } 
+
+    else {
       intake.move(0);
       claw_spin.move(0);
     }

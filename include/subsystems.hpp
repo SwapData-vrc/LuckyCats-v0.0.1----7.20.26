@@ -1,9 +1,15 @@
 #pragma once
 
-// Angle brackets, not quotes -- see the note in field.hpp. The simulator
-// substitutes stub PROS and LemLib headers by -I order.
-#include <main.h>         // IWYU pragma: keep
+// Quoted for the brain, angle brackets for the simulator -- see the note in
+// field.hpp for why this is not just a style choice.
+#ifdef LUCKYCATS_SIM
 #include <lemlib/api.hpp> // IWYU pragma: keep
+#include <main.h>         // IWYU pragma: keep
+#else
+#include "lemlib/api.hpp" // IWYU pragma: keep
+#include "main.h"         // IWYU pragma: keep
+#endif
+
 #include <cstdint>
 
 // Declarations only -- every one of these is defined exactly once in

@@ -1,9 +1,23 @@
 #pragma once
 
-// Angle brackets, not quotes: the desktop simulator (sim/) substitutes its own
-// LVGL via -I order, and a quoted include would always resolve to the copy
-// sitting next to this header instead.
+// The simulator substitutes its own LVGL, which needs an angle-bracket include
+// so -I order can win: a quoted include searches this header's own directory
+// first and would always find the PROS copy sitting next to it.
+//
+// The brain build must NOT use angle brackets, though. PROS's common.mk puts
+// include/ on the path with -iquote only, which serves quoted includes and
+// nothing else. Angle brackets here therefore compiled only because the project
+// Makefile adds -I$(INCDIR) by hand -- and the compile_commands.json that PROS
+// generates for clangd does not carry that flag, so every editor reported
+// unresolved includes in main.cpp and subsystems.cpp while the build was fine.
+//
+// So: quoted on the brain, angle brackets under the simulator's own define.
+#ifdef LUCKYCATS_SIM
 #include <liblvgl/lvgl.h> // IWYU pragma: keep
+#else
+#include "liblvgl/lvgl.h" // IWYU pragma: keep
+#endif
+
 #include <cstdint>
 
 /**

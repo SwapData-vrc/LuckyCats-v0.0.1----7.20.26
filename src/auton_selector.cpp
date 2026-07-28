@@ -246,8 +246,10 @@ void build_route_options() {
   std::snprintf(g_route_options + p, sizeof(g_route_options) - static_cast<size_t>(p), "Custom route");
 }
 
-// The custom route. RAM only -- never written to flash, so it is gone on power
-// cycle. It is kept after a run so you can re-run the same test.
+// The hand-built route. Saved to the SD card with everything else, so it does
+// survive a power cycle -- an earlier comment here said it did not, which was
+// true before persistence existed. With no SD card it is RAM only.
+// It is kept after a run so the same test can be repeated.
 RouteBuf g_custom{{}, 0};
 float g_custom_start[3] = {-52.0f, 0.0f, 90.0f};
 
@@ -427,6 +429,7 @@ void load_saved() {
 
   char line[128];
   int n = 0;
+  int dropped = 0;
   bool first = true;
   while (std::fgets(line, sizeof(line), f) != nullptr) {
     char* p = line;
@@ -459,11 +462,14 @@ void load_saved() {
       g_custom_start[2] = c;
     } else if (std::sscanf(p, "step %15s %f %f %u", tag, &a, &b, &fl) == 4) {
       Kind k;
-      if (kind_from_tag(tag, k) && n < MAX_STEPS)
-        g_custom.s[n++] = Step{k, a, b, static_cast<uint8_t>(fl)};
+      if (kind_from_tag(tag, k)) {
+        if (n < MAX_STEPS) g_custom.s[n++] = Step{k, a, b, static_cast<uint8_t>(fl)};
+        else ++dropped; // a hand-edited file can hold more steps than fit
+      }
     }
   }
   g_custom.n = n;
+  if (dropped > 0) logf("saved route truncated: %d steps over the %d limit", dropped, MAX_STEPS);
   std::fclose(f);
 
   // A saved CUSTOM selection with nothing in it would leave the user staring at
@@ -878,6 +884,7 @@ float g_live_x = 0, g_live_y = 0, g_live_th = 0;
 bool g_recording = false;
 volatile bool g_req_live = false;
 volatile bool g_req_rec_toggle = false;
+volatile bool g_req_trail_clear = false;
 
 void trail_push(float x, float y) {
   if (g_trail_n > 0) {
@@ -1426,7 +1433,12 @@ void restart_preview(bool animate = false) {
 }
 
 void push_step(Kind k, float a, float b = 0, uint8_t flag = 0) {
-  if (g_custom.n >= MAX_STEPS) return;
+  if (g_custom.n >= MAX_STEPS) {
+    // Used to return silently, so tapping the field past the cap looked like
+    // the touchscreen had stopped responding.
+    logf("route full: %d steps is the limit", MAX_STEPS);
+    return;
+  }
   g_custom.s[g_custom.n++] = Step{k, a, b, flag};
   restart_preview();
 }
@@ -1644,6 +1656,10 @@ void anim_cb(lv_timer_t*) {
       intro_finish(); // a match has started; the title sequence is over
       if (g_view != View::LIVE) set_view(View::LIVE);
     }
+  }
+  if (g_req_trail_clear) {
+    g_req_trail_clear = false;
+    g_trail_n = 0;
   }
   if (g_req_rec_toggle) {
     g_req_rec_toggle = false;
@@ -2430,10 +2446,42 @@ void log_clear() {
   g_log_shown = 1; // force update_console to notice and repaint the empty state
 }
 
+// ---------------------------------------------------------------------------
+// Motion timeouts
+//
+// These were fixed at 3000 / 2000 / 4000 ms regardless of how far the robot had
+// to go. A LemLib motion that hits its timeout gives up silently and the route
+// carries on from wherever it stopped, so a long move across the field was
+// being abandoned halfway with nothing on screen to say so.
+//
+// Scaled with the distance and angle instead, with a floor for settling time
+// and a ceiling so a route can never hang past the period. The numbers are
+// deliberately generous: a timeout should be a backstop against something being
+// stuck, not a speed limit.
+// ---------------------------------------------------------------------------
+
+constexpr uint32_t MOVE_FLOOR_MS = 900;
+constexpr uint32_t MOVE_CEIL_MS = 6000;
+
+uint32_t clamp_timeout(float ms) {
+  if (ms < static_cast<float>(MOVE_FLOOR_MS)) return MOVE_FLOOR_MS;
+  if (ms > static_cast<float>(MOVE_CEIL_MS)) return MOVE_CEIL_MS;
+  return static_cast<uint32_t>(ms);
+}
+
+/// ~55 ms per inch, which is about three times the modelled drive rate.
+uint32_t drive_timeout(float inches) { return clamp_timeout(std::fabs(inches) * 55.0f + 600.0f); }
+
+/// ~9 ms per degree, on the same generous basis.
+uint32_t turn_timeout(float degrees) { return clamp_timeout(std::fabs(degrees) * 9.0f + 500.0f); }
+
 void run_selected() {
   g_auton_active = true;
-  show_live();  // the trail on this view is the record of what actually happened
-  g_trail_n = 0; // start the trace clean, so it is this run and not the last one
+  show_live(); // the trail on this view is the record of what actually happened
+  // Cleared through a request flag, not written directly: this runs on the
+  // autonomous task and g_trail_n belongs to the UI task, which is the exact
+  // race the other cross-task requests in this file exist to avoid.
+  g_req_trail_clear = true;
 
   float sx, sy, sth;
   start_pose(sx, sy, sth);
@@ -2470,22 +2518,30 @@ void run_selected() {
         const float t = static_cast<float>(p.theta) * PI_F / 180.0f;
         lemlib::MoveToPointParams mp;
         mp.forwards = (s.a >= 0);
-        chassis.moveToPoint(p.x + std::sin(t) * s.a, p.y + std::cos(t) * s.a, 3000, mp, false);
+        chassis.moveToPoint(p.x + std::sin(t) * s.a, p.y + std::cos(t) * s.a, drive_timeout(s.a), mp,
+                            false);
         break;
       }
-      case Kind::TURN:
-        chassis.turnToHeading(s.a, 2000, lemlib::TurnToHeadingParams{}, false);
+      case Kind::TURN: {
+        const lemlib::Pose p = chassis.getPose();
+        const float d = wrap180(s.a - static_cast<float>(p.theta));
+        chassis.turnToHeading(s.a, turn_timeout(d), lemlib::TurnToHeadingParams{}, false);
         break;
+      }
       case Kind::GOTO: {
         const lemlib::Pose p = chassis.getPose();
-        const float bear = bearing_to(static_cast<float>(p.x), static_cast<float>(p.y), s.a, s.b);
+        const float px = static_cast<float>(p.x), py = static_cast<float>(p.y);
+        const float bear = bearing_to(px, py, s.a, s.b);
+        const float dist = std::sqrt((s.a - px) * (s.a - px) + (s.b - py) * (s.b - py));
+        const float d = wrap180(bear - static_cast<float>(p.theta));
         if (s.flag & F_SWERVE) {
           // one boomerang motion: the robot arcs in and settles on the bearing
-          chassis.moveToPose(s.a, s.b, bear, 4000, lemlib::MoveToPoseParams{}, false);
+          chassis.moveToPose(s.a, s.b, bear, drive_timeout(dist) + turn_timeout(d),
+                             lemlib::MoveToPoseParams{}, false);
         } else {
           // default: square up to the point first, then drive straight at it
-          chassis.turnToHeading(bear, 1500, lemlib::TurnToHeadingParams{}, false);
-          chassis.moveToPoint(s.a, s.b, 4000, lemlib::MoveToPointParams{}, false);
+          chassis.turnToHeading(bear, turn_timeout(d), lemlib::TurnToHeadingParams{}, false);
+          chassis.moveToPoint(s.a, s.b, drive_timeout(dist), lemlib::MoveToPointParams{}, false);
         }
         break;
       }

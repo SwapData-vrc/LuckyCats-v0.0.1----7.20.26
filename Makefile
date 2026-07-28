@@ -13,12 +13,20 @@ SRCDIR=$(ROOT)/src
 INCDIR=$(ROOT)/include
 
 WARNFLAGS+=
-# common.mk passes the include dir as -iquote, which only serves #include "...".
-# Headers shared with the desktop simulator (sim/) use angle brackets for the
-# external libraries so the simulator can substitute its own by -I order, so
-# include/ has to be on the angle-bracket path here as well.
-EXTRA_CFLAGS=-I$(INCDIR)
-EXTRA_CXXFLAGS=-I$(INCDIR)
+# Deliberately empty. These used to carry -I$(INCDIR), because headers shared
+# with the desktop simulator used angle brackets for the external libraries and
+# common.mk only passes the include dir as -iquote, which serves #include "..."
+# and nothing else.
+#
+# That built fine and broke every editor: the compile_commands.json PROS
+# generates for clangd does not carry EXTRA_CXXFLAGS, so main.cpp and
+# subsystems.cpp showed unresolved includes while make was perfectly happy.
+# The headers now use quoted includes for the brain and angle brackets only
+# under the simulator's own LUCKYCATS_SIM define, so stock PROS flags suffice.
+# Keep it that way -- if this needs filling in again, the editor will silently
+# disagree with the build.
+EXTRA_CFLAGS=
+EXTRA_CXXFLAGS=
 
 # Set to 1 to enable hot/cold linking
 USE_PACKAGE:=1

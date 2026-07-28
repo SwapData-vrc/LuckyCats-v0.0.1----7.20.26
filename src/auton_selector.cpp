@@ -796,6 +796,12 @@ bool leg_step(float& u_out) {
 
 void sim_tick() {
   if (g_sim.finished) {
+    // Loop the preview, but only when there is something to loop. A compiled
+    // routine has no steps, so this used to finish instantly and restart about
+    // once a second forever -- invisible, except that sim_begin clears the
+    // Toggle ownership, so quadrants set by long-pressing were wiped a second
+    // later and it looked like the long-press had not registered.
+    if (step_count() == 0) return;
     if (g_sim.hold > END_HOLD_MS) sim_reset();
     else g_sim.hold += FRAME_MS;
     return;
@@ -2347,48 +2353,119 @@ void build_hud(lv_obj_t* scr) {
 }
 
 // ---------------------------------------------------------------------------
-// Boot-time port check
+// Boot-time device check
 //
-// Walks the manifest in subsystems.cpp and reports anything the brain cannot
-// see. This is the failure that costs matches: a motor knocked out of its port
-// between rounds looks exactly like a tuning problem from the driver station,
-// and it is invisible until the robot drives crooked.
+// Two separate questions, and the more useful one needs no hardware at all:
 //
-// Probes with a throwaway device object rather than the real globals, because
-// the check has to name the port that is empty, and the globals are groups.
+//   1. Does any port appear twice? That is a code bug, not a wiring fault, and
+//      it is the one that cost us a match's worth of debugging: port 7 was
+//      listed as a lift motor while it was really on the left drivetrain, so
+//      opcontrol braked it forty times a second while the chassis drove it and
+//      the left side lost most of its power. It tested fine on its own.
+//      This check runs everywhere, simulator included.
+//
+//   2. Is anything missing or the wrong device type? Needs a real brain, so it
+//      is skipped in the simulator rather than faked.
+//
+// Ports come from the objects themselves, never from a hand-written list, so
+// this cannot be fooled by a table that has drifted out of date.
 // ---------------------------------------------------------------------------
 
+/// Every smart port the robot claims, with the subsystem that claims it.
+struct PortUse {
+  const char* owner;
+  int port; // 1-21, sign stripped
+};
+
+int collect_ports(PortUse* out, int max_n) {
+  int n = 0;
+  for (int i = 0; i < MOTOR_GROUP_COUNT && n < max_n; ++i) {
+    for (std::int8_t raw : MOTOR_GROUPS[i].group->get_port_all()) {
+      if (n >= max_n) break;
+      out[n].owner = MOTOR_GROUPS[i].name;
+      out[n].port = raw < 0 ? -raw : raw;
+      ++n;
+    }
+  }
+  for (int i = 0; i < MOTOR_COUNT && n < max_n; ++i) {
+    out[n].owner = MOTORS[i].name;
+    out[n].port = static_cast<int>(MOTORS[i].motor->get_port());
+    ++n;
+  }
+  if (n < max_n) {
+    out[n].owner = "imu";
+    out[n].port = static_cast<int>(imu.get_port());
+    ++n;
+  }
+  if (n < max_n) {
+    out[n].owner = "horiz enc";
+    out[n].port = static_cast<int>(horizontal_encoder.get_port());
+    ++n;
+  }
+  return n;
+}
+
 void device_check() {
+  constexpr int MAX_PORTS = 24;
+  PortUse used[MAX_PORTS];
+  const int n = collect_ports(used, MAX_PORTS);
+
+  // ---- conflicts: pure data, so this runs on the brain and in the simulator
+  int conflicts = 0;
+  for (int i = 0; i < n; ++i) {
+    for (int j = i + 1; j < n; ++j) {
+      if (used[i].port != used[j].port) continue;
+      ++conflicts;
+      logf("PORT %d claimed by %s AND %s", used[i].port, used[i].owner, used[j].owner);
+    }
+  }
+  if (conflicts > 0) {
+    logf("%d port conflict%s -- fix subsystems.cpp", conflicts, conflicts == 1 ? "" : "s");
+    if (g_lbl_health != nullptr) {
+      char msg[40];
+      std::snprintf(msg, sizeof(msg), "%d PORT CONFLICT%s", conflicts, conflicts == 1 ? "" : "S");
+      lv_label_set_text(g_lbl_health, msg);
+      lv_obj_set_style_text_color(g_lbl_health, lv_color_hex(ink::RED), LV_PART_MAIN);
+    }
+    return; // a conflict makes the presence check below meaningless
+  }
+
 #ifdef LUCKYCATS_SIM
   // No smart ports on a PC. Saying so beats a green "all present" that means
-  // nothing.
-  logf("port check skipped: simulator");
+  // nothing -- but the conflict check above did run, and that is the half that
+  // catches code bugs rather than loose cables.
+  logf("%d ports, no conflicts; presence check needs a brain", n);
   if (g_lbl_health != nullptr) {
     lv_label_set_text(g_lbl_health, "simulated hardware");
     lv_obj_set_style_text_color(g_lbl_health, lv_color_hex(ink::DIM), LV_PART_MAIN);
   }
 #else
   int missing = 0;
-  for (int i = 0; i < DEVICE_PORT_COUNT; ++i) {
-    const DevicePort& d = DEVICE_PORTS[i];
-    // The manifest carries the constructor's sign, which encodes reversal, not
-    // a port number. Ports themselves are 1-21.
-    const int p = (d.port < 0) ? -d.port : d.port;
-    bool ok = false;
-    switch (d.kind) {
-      case DevKind::MOTOR: ok = pros::Motor(static_cast<std::int8_t>(p)).is_installed(); break;
-      case DevKind::IMU: ok = pros::Imu(static_cast<std::uint8_t>(p)).is_installed(); break;
-      case DevKind::ROTATION: ok = pros::Rotation(static_cast<std::int8_t>(p)).is_installed(); break;
-    }
-    if (!ok) {
+  for (int i = 0; i < MOTOR_GROUP_COUNT; ++i) {
+    for (std::int8_t raw : MOTOR_GROUPS[i].group->get_port_all()) {
+      const int port = raw < 0 ? -raw : raw;
+      if (pros::Motor(static_cast<std::int8_t>(port)).is_installed()) continue;
       ++missing;
-      logf("port %2d MISSING: %s", p, d.name);
+      logf("port %2d MISSING: %s", port, MOTOR_GROUPS[i].name);
     }
+  }
+  for (int i = 0; i < MOTOR_COUNT; ++i) {
+    if (MOTORS[i].motor->is_installed()) continue;
+    ++missing;
+    logf("port %2d MISSING: %s", static_cast<int>(MOTORS[i].motor->get_port()), MOTORS[i].name);
+  }
+  if (!imu.is_installed()) {
+    ++missing;
+    logf("port %2d MISSING: imu", static_cast<int>(imu.get_port()));
+  }
+  if (!horizontal_encoder.is_installed()) {
+    ++missing;
+    logf("port %2d MISSING: horiz enc", static_cast<int>(horizontal_encoder.get_port()));
   }
 
   char msg[40];
-  if (missing == 0) std::snprintf(msg, sizeof(msg), "%d ports OK", DEVICE_PORT_COUNT);
-  else std::snprintf(msg, sizeof(msg), "%d of %d ports MISSING", missing, DEVICE_PORT_COUNT);
+  if (missing == 0) std::snprintf(msg, sizeof(msg), "%d ports OK", n);
+  else std::snprintf(msg, sizeof(msg), "%d of %d ports MISSING", missing, n);
   logf("%s", msg);
 
   if (g_lbl_health != nullptr) {

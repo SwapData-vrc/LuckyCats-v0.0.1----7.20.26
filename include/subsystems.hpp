@@ -55,21 +55,30 @@ extern pros::Motor claw_spin;      // claw roller: grip (+) / release (-)
 extern pros::Motor intake;         // 600 rpm intake: in (+) / out (-)
 
 // ---------------------------------------------------------------------------
-// Port manifest
+// Device manifest
 //
-// Every smart port the robot uses, in one list, so the boot-time health check
-// can name what is missing instead of reporting "a motor". This is the only
-// place the ports appear twice; keep it beside the constructors it mirrors so
-// the two are edited together.
+// Names paired with the objects themselves, NOT with port numbers. The boot
+// check asks each object what port it is on, so this can never disagree with
+// the constructors above.
+//
+// It used to be a second table of literal port numbers, which drifted the first
+// time the wiring changed: the drivetrain moved and the manifest still called
+// the lift's ports "drive L1" and "drive L2". A list that can be wrong about
+// hardware is worse than no list.
 // ---------------------------------------------------------------------------
 
-enum class DevKind : std::uint8_t { MOTOR, IMU, ROTATION };
-
-struct DevicePort {
+struct MotorGroupRef {
   const char* name;
-  std::int8_t port; // signed exactly as passed to the constructor
-  DevKind kind;
+  pros::MotorGroup* group;
 };
 
-extern const DevicePort DEVICE_PORTS[];
-extern const int DEVICE_PORT_COUNT;
+struct MotorRef {
+  const char* name;
+  pros::Motor* motor;
+};
+
+extern const MotorGroupRef MOTOR_GROUPS[];
+extern const int MOTOR_GROUP_COUNT;
+
+extern const MotorRef MOTORS[];
+extern const int MOTOR_COUNT;

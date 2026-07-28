@@ -41,6 +41,7 @@ class Motor {
   double get_position() const;
   double get_target_position() const;
   int get_voltage_command() const;
+  std::uint8_t get_port() const;
 
  private:
   std::int8_t port_;
@@ -61,6 +62,7 @@ class MotorGroup {
   double get_position() const;
   double get_target_position() const;
   int get_voltage_command() const;
+  std::vector<std::int8_t> get_port_all() const;
 
  private:
   std::vector<std::int8_t> ports_;
@@ -75,6 +77,7 @@ class Imu {
   bool is_calibrating() const;
   double get_heading() const;
   double get_rotation() const;
+  std::uint8_t get_port() const;
 
  private:
   std::uint8_t port_;
@@ -85,6 +88,7 @@ class Rotation {
   explicit Rotation(std::int8_t port);
   double get_position() const;
   void reset_position();
+  std::uint8_t get_port() const;
 
  private:
   std::int8_t port_;

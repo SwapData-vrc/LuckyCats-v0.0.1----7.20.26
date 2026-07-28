@@ -83,6 +83,8 @@ namespace pros {
 
 Motor::Motor(std::int8_t port, MotorGearset gearset) : port_(port), gearset_(gearset), idx_(new_motor()) {}
 
+std::uint8_t Motor::get_port() const { return static_cast<std::uint8_t>(port_ < 0 ? -port_ : port_); }
+
 void Motor::move(int voltage) {
   std::lock_guard<std::mutex> lk(g_motor_m);
   g_motors[idx_].voltage = voltage;
@@ -139,6 +141,8 @@ void MotorGroup::move_absolute(double position, int velocity) {
 void MotorGroup::brake() { move(0); }
 void MotorGroup::set_brake_mode(MotorBrake) {}
 
+std::vector<std::int8_t> MotorGroup::get_port_all() const { return ports_; }
+
 double MotorGroup::get_position() const {
   std::lock_guard<std::mutex> lk(g_motor_m);
   return g_motors[idx_].position;
@@ -155,12 +159,14 @@ int MotorGroup::get_voltage_command() const {
 }
 
 Imu::Imu(std::uint8_t port) : port_(port) {}
+std::uint8_t Imu::get_port() const { return port_; }
 void Imu::reset(bool) {}
 bool Imu::is_calibrating() const { return false; }
 double Imu::get_heading() const { return chassis.getPose().theta; }
 double Imu::get_rotation() const { return chassis.getPose().theta; }
 
 Rotation::Rotation(std::int8_t port) : port_(port) {}
+std::uint8_t Rotation::get_port() const { return static_cast<std::uint8_t>(port_ < 0 ? -port_ : port_); }
 double Rotation::get_position() const { return 0; }
 void Rotation::reset_position() {}
 
@@ -407,8 +413,8 @@ void Chassis::arcade(int throttle, int turn, bool, float) {
 // Hardware globals -- mirrors src/subsystems.cpp
 // ===========================================================================
 
-pros::MotorGroup left_motors({-1, 2, -3}, pros::MotorGearset::blue);
-pros::MotorGroup right_motors({4, -5, 6}, pros::MotorGearset::blue);
+pros::MotorGroup left_motors({7, -5}, pros::MotorGearset::blue);
+pros::MotorGroup right_motors({4, 6}, pros::MotorGearset::blue);
 
 lemlib::Drivetrain drivetrain(&left_motors, &right_motors, 10, lemlib::Omniwheel::NEW_325, 360, 2);
 
@@ -426,22 +432,26 @@ lemlib::ControllerSettings angular_controller(2, 0, 10, 3, 1, 100, 3, 500, 0);
 
 lemlib::Chassis chassis(drivetrain, lateral_controller, angular_controller, sensors);
 
-pros::MotorGroup lift({7, -8}, pros::MotorGearset::green);
+pros::MotorGroup lift({1, -2}, pros::MotorGearset::green);
 pros::Motor claw_pivot(9, pros::MotorGearset::green);
 pros::Motor claw_spin(11, pros::MotorGearset::green);
 pros::Motor intake(12, pros::MotorGearset::blue);
 
-// Same manifest as src/subsystems.cpp. Nothing here probes it -- there are no
-// smart ports on a PC -- but the symbol has to exist or auton_selector.cpp
-// fails to link, and a stale copy would be worse than none.
-const DevicePort DEVICE_PORTS[] = {
-    {"drive L1", -1, DevKind::MOTOR},  {"drive L2", 2, DevKind::MOTOR},
-    {"drive L3", -3, DevKind::MOTOR},  {"drive R1", 4, DevKind::MOTOR},
-    {"drive R2", -5, DevKind::MOTOR},  {"drive R3", 6, DevKind::MOTOR},
-    {"lift A", 7, DevKind::MOTOR},     {"lift B", -8, DevKind::MOTOR},
-    {"claw pivot", 9, DevKind::MOTOR}, {"claw spin", 11, DevKind::MOTOR},
-    {"intake", 12, DevKind::MOTOR},    {"imu", 10, DevKind::IMU},
-    {"horiz enc", 20, DevKind::ROTATION},
-};
+// ---------------------------------------------------------------------------
+// Device manifest. Names only -- the ports come from the objects themselves, so
+// this cannot drift out of step with the constructors above.
+// ---------------------------------------------------------------------------
 
-const int DEVICE_PORT_COUNT = static_cast<int>(sizeof(DEVICE_PORTS) / sizeof(DEVICE_PORTS[0]));
+const MotorGroupRef MOTOR_GROUPS[] = {
+    {"drive left", &left_motors},
+    {"drive right", &right_motors},
+    {"lift", &lift},
+};
+const int MOTOR_GROUP_COUNT = static_cast<int>(sizeof(MOTOR_GROUPS) / sizeof(MOTOR_GROUPS[0]));
+
+const MotorRef MOTORS[] = {
+    {"claw pivot", &claw_pivot},
+    {"claw spin", &claw_spin},
+    {"intake", &intake},
+};
+const int MOTOR_COUNT = static_cast<int>(sizeof(MOTORS) / sizeof(MOTORS[0]));

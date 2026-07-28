@@ -40,9 +40,10 @@ the UI timer, not a sleep, so it never delays autonomous starting.
 Five screens after that:
 
 - **Landing** — team badge, version, port health, and the way into the rest
-- **Run** — pick alliance, routine and start position; X / Y / heading are shown
-  over the field, and the hand-built route animates there
-- **Design** — tap the field to drop waypoints and build a route by hand
+- **Run** — pick alliance, routine and start position, and start it with RUN;
+  X / Y / heading are shown over the field
+- **Design** — tap the field to drop waypoints and build a route by hand, then
+  RUN it without leaving the screen
 - **Live** — odometry readout, battery, and route recording
 - **Console** — scrolling debug log; see [Console](#console)
 
@@ -133,6 +134,26 @@ which meant a routine could not be read literally.
 **Scoring is front-to-back.** The robot intakes at the front and ejects off the
 back, so reverse into a Goal rather than driving at it. `score_backwards()` in
 `autons.cpp` is the pattern.
+
+### Running one from the screen
+
+The **RUN** button in the header of the Run and Design views drives the selected
+route without a competition switch, for a practice field.
+
+It takes two taps. The first arms it and the label turns amber and says `GO?`;
+the second, within three seconds, starts it. A single tap that makes a robot
+drive is a bad idea in a pit, and the arming lapses on its own so a stray touch
+cannot leave the robot one tap from moving for the rest of the day.
+
+While a route is running the same button turns red and says `STOP`. Stopping
+takes effect at the next step boundary and cancels whatever motion is in flight,
+so a hand-built route stops promptly. A compiled routine only stops when it
+returns — there is nowhere inside your function to check a flag. **This is a
+convenience, not a safety device.** The field disable and the power switch are
+the safety devices.
+
+The button refuses to do anything when the brain is under competition control.
+Under field control the only thing that starts autonomous is the field.
 
 ### Seeing what a routine does
 

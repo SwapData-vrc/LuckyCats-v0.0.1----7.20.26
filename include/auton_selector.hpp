@@ -46,6 +46,36 @@ field::Alliance alliance();
 void run_selected();
 
 // ---------------------------------------------------------------------------
+// Running from the screen
+//
+// The RUN button on the SELECT and DESIGN views, for trying a route on a
+// practice field without a competition switch.
+// ---------------------------------------------------------------------------
+
+/// Start the selected route on its own task and return immediately.
+///
+/// Refuses, and returns false, if a route is already running or if the brain is
+/// under competition control -- a button on the screen must not be able to
+/// drive the robot during a real match.
+///
+/// It has to be a task: run_selected() blocks for the length of the route, and
+/// this is called from a touch event, which runs on the LVGL task. Calling it
+/// directly would freeze the screen for the whole route.
+bool request_run();
+
+/// Ask a running route to stop. Takes effect at the next step boundary, so a
+/// hand-built route stops promptly; a compiled routine only stops once it
+/// returns, because there is nowhere inside someone else's function to check.
+///
+/// This is a convenience, not a safety device. The field disable and the power
+/// switch are the safety devices.
+void request_stop();
+
+/// True from the moment a route starts driving until it finishes, whether it
+/// was started by the screen or by autonomous().
+bool running();
+
+// ---------------------------------------------------------------------------
 // Cross-task requests
 //
 // These are called from the autonomous / opcontrol tasks, so they only raise a

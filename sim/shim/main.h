@@ -13,6 +13,8 @@
 
 #include <cstdint>
 #include <initializer_list>
+#include <thread>
+#include <utility>
 #include <vector>
 
 namespace pros {
@@ -155,6 +157,21 @@ double get_voltage();
 namespace competition {
 bool is_autonomous();
 bool is_disabled();
+/// Always false here: there is no field control attached to a PC. The Run
+/// button on the screen uses this to refuse to drive during a real match.
+bool is_connected();
 } // namespace competition
+
+/// Detached std::thread behind a PROS-shaped name. Enough for "run this in the
+/// background so the UI keeps painting", which is all the project asks of it.
+/// No priorities, no notifications, no join -- add them when something needs
+/// them rather than pretending they work.
+class Task {
+ public:
+  template <class F>
+  explicit Task(F&& function, const char* = "") {
+    std::thread(std::forward<F>(function)).detach();
+  }
+};
 
 } // namespace pros

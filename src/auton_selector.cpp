@@ -886,6 +886,9 @@ volatile bool g_req_live = false;
 volatile bool g_req_rec_toggle = false;
 volatile bool g_req_trail_clear = false;
 
+/// Set by request_stop(), read by the step loop between steps.
+volatile bool g_cancel = false;
+
 void trail_push(float x, float y) {
   if (g_trail_n > 0) {
     const float dx = x - g_trail[g_trail_n - 1].x, dy = y - g_trail[g_trail_n - 1].y;
@@ -1161,6 +1164,19 @@ lv_obj_t* g_lbl_log_count = nullptr;
 // LANDING widgets
 lv_obj_t* g_lbl_health = nullptr;
 
+// RUN button. One per card view that has it, updated together.
+//
+// Two taps rather than one: a single tap on a touchscreen that makes a robot
+// drive is a bad idea in a pit. The first tap arms and the label says GO?, the
+// second within ARM_MS starts it. While running the same button stops it.
+constexpr int RUN_BTN_MAX = 2;
+constexpr uint32_t ARM_MS = 3000;
+lv_obj_t* g_run_btn[RUN_BTN_MAX] = {};
+lv_obj_t* g_run_lbl[RUN_BTN_MAX] = {};
+int g_run_btn_n = 0;
+bool g_run_armed = false;
+uint32_t g_run_armed_at = 0;
+
 // Overlays. Neither is a View: both sit on top of whatever the selector is
 // already showing, and blackout in particular has to survive a view switch
 // requested by autonomous() starting.
@@ -1296,6 +1312,24 @@ void update_readout() {
       lv_label_set_text(g_lbl_est, buf);
       lv_obj_set_style_text_color(g_lbl_est, lv_color_hex(over ? ink::WARN : ink::DIM), LV_PART_MAIN);
     }
+  }
+}
+
+void update_run_btn() {
+  // Disarm on a timeout so a stray tap in the pit cannot leave the robot one
+  // touch from driving for the rest of the day.
+  if (g_run_armed && pros::millis() - g_run_armed_at > ARM_MS) g_run_armed = false;
+
+  const bool go = g_auton_active;
+  const char* text = go ? "STOP" : (g_run_armed ? "GO?" : "RUN");
+  const uint32_t bg = go ? ink::RED : (g_run_armed ? ink::WARN : ink::CTRL_HI);
+
+  for (int i = 0; i < g_run_btn_n; ++i) {
+    if (g_run_lbl[i] == nullptr) continue;
+    lv_label_set_text(g_run_lbl[i], text);
+    lv_obj_set_style_bg_color(g_run_btn[i], lv_color_hex(bg), LV_PART_MAIN);
+    lv_obj_set_style_text_color(g_run_lbl[i], lv_color_hex(go || g_run_armed ? ink::BG : ink::TEXT),
+                                LV_PART_MAIN);
   }
 }
 
@@ -1555,6 +1589,19 @@ void step_cb(lv_event_t* e) {
 
 void rec_btn_cb(lv_event_t*) { g_req_rec_toggle = true; }
 
+void run_btn_cb(lv_event_t*) {
+  if (g_auton_active) {
+    request_stop();
+  } else if (g_run_armed) {
+    g_run_armed = false;
+    request_run();
+  } else {
+    g_run_armed = true;
+    g_run_armed_at = pros::millis();
+  }
+  update_run_btn();
+}
+
 void log_clear_cb(lv_event_t*) {
   log_clear();
   update_console();
@@ -1699,6 +1746,8 @@ void anim_cb(lv_timer_t*) {
     return;
   }
 
+  update_run_btn();
+
   if (g_view == View::CONSOLE) {
     update_console();
     return; // no field, no preview -- nothing else on this view moves
@@ -1817,11 +1866,22 @@ lv_obj_t* make_card(lv_obj_t* root) {
 }
 
 /// Back chevron plus a section title, occupying the top 24 px of a card.
-void make_header(lv_obj_t* card, const char* title) {
+///
+/// `with_run` adds the RUN button on the right of the same row. The header is
+/// the only strip of a card that is reliably free, and putting it there means
+/// it lands in the same place on every view that has one.
+void make_header(lv_obj_t* card, const char* title, bool with_run = false) {
   make_button(card, 0, 0, 60, 24, LV_SYMBOL_LEFT "  Menu", nav_cb, static_cast<int>(View::LANDING), ink::CTRL,
               &lv_font_montserrat_12);
   lv_obj_t* t = make_label(card, 70, 4, title, ink::TEXT, &lv_font_montserrat_16);
   lv_obj_set_style_text_letter_space(t, 1, LV_PART_MAIN);
+
+  if (!with_run || g_run_btn_n >= RUN_BTN_MAX) return;
+  lv_obj_t* b = make_button(card, COL_W - 56, 0, 56, 24, "RUN", run_btn_cb, 0, ink::CTRL_HI,
+                            &lv_font_montserrat_14);
+  g_run_btn[g_run_btn_n] = b;
+  g_run_lbl[g_run_btn_n] = lv_obj_get_child(b, 0);
+  ++g_run_btn_n;
 }
 
 void make_rule(lv_obj_t* card, int y) {
@@ -1910,7 +1970,7 @@ void build_select(lv_obj_t* scr) {
   lv_obj_add_flag(root, LV_OBJ_FLAG_HIDDEN);
 
   lv_obj_t* card = make_card(root);
-  make_header(card, "RUN");
+  make_header(card, "RUN", true);
 
   make_caption(card, 2, 32, "ALLIANCE");
   g_dd_alliance = make_dropdown(card, 0, 44, COL_W, "Red\nBlue", alliance_cb);
@@ -1938,7 +1998,7 @@ void build_edit(lv_obj_t* scr) {
   lv_obj_add_flag(root, LV_OBJ_FLAG_HIDDEN);
 
   lv_obj_t* card = make_card(root);
-  make_header(card, "DESIGN");
+  make_header(card, "DESIGN", true);
 
   g_dd_add = make_dropdown(card, 0, 32, COL_W,
                            "Drive\nTurn\nIntake in\nIntake out\nClaw grip\nClaw release\n"
@@ -2475,8 +2535,22 @@ uint32_t drive_timeout(float inches) { return clamp_timeout(std::fabs(inches) * 
 /// ~9 ms per degree, on the same generous basis.
 uint32_t turn_timeout(float degrees) { return clamp_timeout(std::fabs(degrees) * 9.0f + 500.0f); }
 
+/// Everything both paths do on the way out: stop the manipulator, record the
+/// duration and drop the active flag. Duplicated in two places before, which is
+/// how the compiled path ended up not stopping the intake on a cancel.
+void finish_run(uint32_t t0) {
+  intake.move(0);
+  claw_spin.move(0);
+  lift.brake();
+  g_last_run_ms = pros::millis() - t0;
+  g_auton_active = false;
+  g_cancel = false;
+  logf("auton done in %lu ms", static_cast<unsigned long>(g_last_run_ms));
+}
+
 void run_selected() {
   g_auton_active = true;
+  g_cancel = false;
   show_live(); // the trail on this view is the record of what actually happened
   // Cleared through a request flag, not written directly: this runs on the
   // autonomous task and g_trail_n belongs to the UI task, which is the exact
@@ -2501,16 +2575,18 @@ void run_selected() {
     else logf("routine is null");
 
     chassis.waitUntilDone(); // in case the routine left a motion running
-    intake.move(0);
-    claw_spin.move(0);
-    g_last_run_ms = pros::millis() - t0;
-    g_auton_active = false;
-    logf("auton done in %lu ms", static_cast<unsigned long>(g_last_run_ms));
+    finish_run(t0);
     return;
   }
 
   const int n = step_count();
   for (int i = 0; i < n; ++i) {
+    // Between steps, not inside one: a LemLib motion called with false is
+    // already blocking by the time anything could ask it to stop.
+    if (g_cancel) {
+      logf("stopped by request at step %d/%d", i + 1, n);
+      break;
+    }
     const Step s = step_at(i);
     switch (s.kind) {
       case Kind::DRIVE: {
@@ -2576,11 +2652,44 @@ void run_selected() {
     logf("%2d/%d  %s", i + 1, n, step_desc(s));
   }
 
-  intake.move(0);
-  claw_spin.move(0);
-  g_last_run_ms = pros::millis() - t0;
-  g_auton_active = false;
-  logf("auton done in %lu ms", static_cast<unsigned long>(g_last_run_ms));
+  finish_run(t0);
 }
+
+// ---------------------------------------------------------------------------
+// Starting a route from the screen
+// ---------------------------------------------------------------------------
+
+bool request_run() {
+  if (g_auton_active) {
+    logf("already running");
+    return false;
+  }
+  // A touchscreen button must never be able to drive the robot at an event.
+  // Under field control the only thing that starts autonomous is the field.
+  if (pros::competition::is_connected()) {
+    logf("refused: under competition control");
+    return false;
+  }
+
+  g_cancel = false;
+  // Held in a static so the handle outlives this function. The task itself
+  // keeps running either way -- PROS's Task destructor does not kill it -- but
+  // a dangling handle is not worth the argument.
+  static pros::Task* runner = nullptr;
+  delete runner;
+  runner = new pros::Task([] { run_selected(); }, "auton_screen");
+  return true;
+}
+
+void request_stop() {
+  if (!g_auton_active) return;
+  g_cancel = true;
+  // Drop whatever motion is in flight as well, so the robot stops now rather
+  // than finishing the leg it is on before noticing.
+  chassis.cancelAllMotions();
+  logf("stop requested");
+}
+
+bool running() { return g_auton_active; }
 
 } // namespace auton

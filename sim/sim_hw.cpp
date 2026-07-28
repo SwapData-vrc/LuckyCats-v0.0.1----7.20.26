@@ -258,6 +258,7 @@ double get_voltage() { return 12800; }
 namespace competition {
 bool is_autonomous() { return false; }
 bool is_disabled() { return false; }
+bool is_connected() { return false; }
 } // namespace competition
 
 } // namespace pros
@@ -371,7 +372,11 @@ void Chassis::turnToHeading(float theta, int timeout, TurnToHeadingParams, bool)
 }
 
 void Chassis::waitUntilDone() {}
+// Motions here are synchronous -- step_move and step_turn return only once the
+// robot has arrived -- so by the time either of these could be called there is
+// nothing left in flight to cancel.
 void Chassis::cancelMotion() {}
+void Chassis::cancelAllMotions() {}
 
 void Chassis::tank(int left, int right, float deadband) {
   if (std::abs(left) < deadband) left = 0;

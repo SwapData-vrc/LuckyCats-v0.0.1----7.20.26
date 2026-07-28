@@ -10,6 +10,19 @@ python sim/build.py          # build only
 python sim/build.py clean
 ```
 
+The binary also takes flags, which is how the autonomous executor gets tested:
+
+```
+luckycats_sim.exe --auton              # run autonomous() at startup
+luckycats_sim.exe --opcontrol          # run opcontrol() at startup
+luckycats_sim.exe --auton --quit-after=15000
+```
+
+F1 and F2 are read through `GetAsyncKeyState` gated on window focus, and Windows
+will not let a background process take the foreground -- so without these flags
+a script cannot start a route at all, and the executor could only ever be tested
+by hand.
+
 First build takes about five minutes (LVGL is ~300 files). After that it is
 incremental and takes seconds.
 
@@ -45,6 +58,7 @@ hardware-only.** A route that looks perfect here can still drive badly.
 | Tap a Toggle | start the route from that quadrant; the robot slides there |
 | Hold a Toggle | cycle who owns that quadrant (preview only) |
 | Hold the badge | leave Blackout Mode |
+| RUN button | run the selected route (two taps: arm, then go) |
 | F1 | run `autonomous()` |
 | F2 | run `opcontrol()` |
 | W / S | left stick, during opcontrol |

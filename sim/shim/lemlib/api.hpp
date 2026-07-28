@@ -106,6 +106,7 @@ class Chassis {
 
   void waitUntilDone();
   void cancelMotion();
+  void cancelAllMotions();
 
   void tank(int left, int right, float deadband = 0);
   void arcade(int throttle, int turn, bool disable_drive_curve = false, float desaturate_bias = 0.5f);

@@ -4,6 +4,43 @@
 #include "subsystems.hpp"     // IWYU pragma: keep
 
 /**
+ * The claw follows the lift, and nothing else is allowed to move it.
+ *
+ * If the lift is 5 inches or more above where it started, the claw points
+ * forward (90 degrees clockwise). Otherwise it points down (0 degrees).
+ *
+ * This runs in its own task so it keeps working in autonomous as well as
+ * driver control. If the check lived in the opcontrol loop instead, the claw
+ * would stop following the lift during autonomous.
+ */
+void claw_task(void* param) {
+  bool forward = false;
+
+  // How many motor degrees the lift turns for one inch of height.
+  double degrees_per_inch = LIFT_TICKS / LIFT_INCHES;
+
+  // Put the claw down to start with, so it is somewhere known.
+  claw_pivot.move_absolute(CLAW_DOWN, 100);
+
+  while (true) {
+    double inches = lift.get_position() / degrees_per_inch;
+
+    // Only send a new command when the claw actually needs to swap sides.
+    // move_absolute starts its move over every time it is called, so sending
+    // the same target 50 times a second would make the claw crawl.
+    if (!forward && inches >= CLAW_UP_INCHES) {
+      forward = true;
+      claw_pivot.move_absolute(CLAW_FORWARD, 100);
+    } else if (forward && inches < CLAW_DOWN_INCHES) {
+      forward = false;
+      claw_pivot.move_absolute(CLAW_DOWN, 100);
+    }
+
+    pros::delay(20);
+  }
+}
+
+/**
  * Runs initialization code. This occurs as soon as the program is started.
  *
  * All other competition modes are blocked by initialize; it is recommended
@@ -24,10 +61,9 @@ void initialize() {
   lift.tare_position();
   claw_pivot.tare_position();
 
-  // From here the claw pivot is nobody's business but its own: this task points
-  // it forward whenever the lift is 5 inches or more above where it started and
-  // straight down otherwise, in every mode.
-  start_claw_daemon();
+  // Start the claw task. It keeps running after initialize() finishes -- the
+  // pros::Task destructor does not stop the task.
+  pros::Task claw(claw_task);
 
   auton::init(); // touchscreen route selector + field preview
 }
@@ -128,10 +164,7 @@ void opcontrol() {
     else
       lift.brake();
 
-    // The claw pivot is fully automatic and has no button. X and B used to
-    // override it while held; they are deliberately gone, and the pivot is
-    // driven by start_claw_daemon() instead, so there is no way to leave it
-    // somewhere the lift height does not agree with.
+    // There is no claw button. claw_task does it all.
 
     // A toggles route recording: drive the route by hand, press A again, and
     // the driven path lands in the Custom slot as GOTO steps.

@@ -98,7 +98,7 @@ on the brain and runs in a match.
 
 ```cpp
 void red_left() {
-  lift_to(LIFT_TRAVEL);
+  lift.move_absolute(LIFT_TRAVEL * LIFT_TICKS, 100);
   intake.move(127);
 
   // false = block until finished. Without it this returns immediately and the
@@ -212,13 +212,19 @@ Work in progress. Known placeholders, in rough order of how much they matter:
   it.
 - `src/subsystems.cpp` declares the right drive motors as blue (600 RPM) while
   the comment says 200 RPM. One of the two is wrong.
-- `LIFT_TICKS` in `src/autons.cpp` is a guess at full cascade travel. Every lift
-  height is a fraction of it, so it is the single number to measure first.
-- Claw-pivot open/closed positions are unmeasured guesses.
+- `LIFT_TICKS` in `include/subsystems.hpp` is a guess at full cascade travel.
+  Every lift height is a fraction of it, so it is the single number to measure
+  first.
+- `LIFT_INCHES` is a guess at how far that actually lifts, in inches. The
+  automatic claw switches at 5 inches, and "5 inches" means nothing until this
+  is measured with a tape.
+- Claw-pivot down/forward positions are unmeasured guesses, and they are in
+  MOTOR degrees — if the pivot is geared, 90 at the shaft is not 90 at the claw.
 - Field coordinates in `src/field.cpp` — goals, toggles, loaders — are estimates,
   not published numbers. Measure before writing routes against them.
 - Driver controls exist but the button mapping is a guess (R1/R2 intake, L1/L2
-  lift, X/B claw). Confirm it with whoever is driving.
+  lift). Confirm it with whoever is driving. The claw has no button — it is
+  automatic (`claw_task` in `src/main.cpp`).
 - The drivetrain cartridge, wheel size and RPM in `src/subsystems.cpp` are all
   marked UNVERIFIED. They scale odometry directly — check them before tuning.
 

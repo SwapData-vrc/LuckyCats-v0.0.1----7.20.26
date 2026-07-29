@@ -147,7 +147,7 @@ enum class Kind : uint8_t {
   GOTO,   // a,b = field point in inches; flag bit 0 = swerve
   INTAKE, // a = +1 in, -1 out, 0 stop
   // There is deliberately no CLAW step. The pivot is driven entirely by lift
-  // height (see update_claw_for_lift) and a step that could command it would be
+  // height (see claw_task in main.cpp) and a step that could command it would be
   // a way to leave it disagreeing with where the lift actually is. Routes saved
   // by an older build still containing a CLAW line will report an unknown step
   // and skip it.
@@ -784,13 +784,12 @@ void apply_leg(float u) {
   g_sim.th = g_sim.sth + g_sim.dth * u;
   g_sim.lift = g_sim.lift_from + (g_sim.lift_to - g_sim.lift_from) * u;
 
-  // The claw is not a step any more, so the preview derives it the same way the
-  // robot does: forward once the lift is CLAW_TRIGGER_IN above the bottom, back
-  // down below CLAW_RELEASE_IN. Same two thresholds, same latch, so what is on
+  // The claw is not a step any more, so the preview works it out the same way
+  // claw_task does on the robot: same two heights, same latch, so what is on
   // the screen is what the robot will do.
-  const float h_in = g_sim.lift * static_cast<float>(LIFT_FULL_TRAVEL_IN);
-  if (!g_sim.claw && h_in >= static_cast<float>(CLAW_TRIGGER_IN)) g_sim.claw = true;
-  else if (g_sim.claw && h_in < static_cast<float>(CLAW_RELEASE_IN)) g_sim.claw = false;
+  float inches = g_sim.lift * static_cast<float>(LIFT_INCHES);
+  if (!g_sim.claw && inches >= static_cast<float>(CLAW_UP_INCHES)) g_sim.claw = true;
+  else if (g_sim.claw && inches < static_cast<float>(CLAW_DOWN_INCHES)) g_sim.claw = false;
 }
 
 /// True once the current leg's clock has run out. Advances that clock.
@@ -2728,7 +2727,7 @@ void run_selected() {
         claw_spin.move(0);
         lift.move_absolute(LIFT_TRAVEL * LIFT_TICKS, 100);
         break;
-      // LIFT and SCORE call update_claw_for_lift() themselves, above.
+      // Nothing here moves the claw -- claw_task in main.cpp does that.
     }
     chassis.waitUntilDone();
     logf("%2d/%d  %s", i + 1, n, step_desc(s));

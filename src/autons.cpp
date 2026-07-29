@@ -54,37 +54,31 @@ constexpr double PI = 3.14159265358979;
 // ---------------------------------------------------------------------------
 // Shared helpers. Ordinary functions -- add whatever you find yourself
 // repeating.
+//
+// Nothing here ever moves the claw. claw_task in main.cpp does that on its own
+// from the lift height, so a routine cannot get the two out of step.
 // ---------------------------------------------------------------------------
 
-// LIFT_TRAVEL, LIFT_TICKS and the claw angles live in subsystems.hpp -- they
-// describe the hardware, and keeping a second copy here is how a drivetrain
-// motor once ended up in the lift group.
-
-/// Command the lift to a fraction of full travel. Does not block: the lift is
-/// still moving when this returns.
-///
-/// Nothing here touches the claw pivot. It follows the lift on its own, from a
-/// background task started in initialize(), so a routine cannot get it out of
-/// step with the lift by forgetting a call.
-void lift_to(double height) { lift.move_absolute(height * LIFT_TICKS, 100); }
-
 /// Reverse into a Goal and eject. Assumes the robot is already squared up with
-/// its back to the Goal -- turnToHeading first.
+/// its back to the Goal -- turnToHeading first. `height` is 0 to 1.
 void score_backwards(double into_inches, double height) {
-  const lemlib::Pose p = chassis.getPose();
-  const double t = p.theta * PI / 180.0;
+  lemlib::Pose p = chassis.getPose();
+  double t = p.theta * PI / 180.0;
+
   // Heading 0 is +Y and increases clockwise, so forward is (sin, cos).
   chassis.moveToPoint(p.x - std::sin(t) * into_inches, p.y - std::cos(t) * into_inches, 1500,
                       {.forwards = false}, false);
 
-  lift_to(height);
+  lift.move_absolute(height * LIFT_TICKS, 100);
   pros::delay(500);
+
   intake.move(-127);
   claw_spin.move(-127);
   pros::delay(600);
   intake.move(0);
   claw_spin.move(0);
-  lift_to(LIFT_TRAVEL);
+
+  lift.move_absolute(LIFT_TRAVEL * LIFT_TICKS, 100);
   pros::delay(400);
 }
 
@@ -98,7 +92,7 @@ void score_backwards(double into_inches, double height) {
 void example() {
   logf("example: start");
 
-  lift_to(LIFT_TRAVEL);
+  lift.move_absolute(LIFT_TRAVEL * LIFT_TICKS, 100);
   intake.move(127);
 
   // false = block until finished. Without it this returns immediately and the

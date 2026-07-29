@@ -80,6 +80,11 @@ void autonomous() { auton::run_selected(); }
 void opcontrol() {
   pros::Controller master(pros::E_CONTROLLER_MASTER);
 
+  // The claw pivot is NOT re-zeroed here. initialize() already tared it, and
+  // zeroing it again at the top of opcontrol would move the goalposts: in a
+  // match opcontrol starts after autonomous, so "position 0" would quietly
+  // become wherever the claw happened to end up rather than where it started.
+  //
   // Hold, not coast: a cascade lift on coast sinks under its own weight the
   // moment the stick is released, and a claw that drifts open drops its load.
   lift.set_brake_mode(pros::MotorBrake::hold);
@@ -102,7 +107,8 @@ void opcontrol() {
     // on are still placeholders -- see src/subsystems.cpp.
 
 
-    // B steps the claw to its next position and wraps back round at the end.
+    // B steps the claw to its next position and wraps back round at the end:
+    // start -> 360 -> 450 -> start.
     //
     // The wrap has to happen HERE, not inside spinclaw. spinclaw takes its
     // argument by value, so setting `position = 0` in there changes only
@@ -113,6 +119,10 @@ void opcontrol() {
       if (claw_position > 2) claw_position = 0;
       spinclaw(claw_position);
     }
+
+    // Switches the claw motor off once it gets where it was sent. Without this
+    // the motor holds against its target forever and creaks.
+    claw_update();
     // R1 / R2: intake in / out. The intake is on the front, scoring is off the
     // back, so "out" is what pushes a load into a Goal.
     if (master.get_digital(pros::E_CONTROLLER_DIGITAL_R1)) {

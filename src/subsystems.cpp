@@ -143,20 +143,49 @@ const int MOTOR_COUNT = static_cast<int>(sizeof(MOTORS) / sizeof(MOTORS[0]));
 
 //TODO: add more subsystems
 
-// Move the claw pivot to one of three positions. The caller keeps track of
-// which one it is on and wraps 2 back round to 0 -- see opcontrol in main.cpp.
+// ---------------------------------------------------------------------------
+// Claw pivot
 //
-// The second number is the speed in RPM, not the -127..127 you use with
-// move(). claw_pivot is a green cartridge, so anything over 200 is just
-// clamped to 200.
+// Three positions, cycled with B: start -> 360 -> 450 -> start.
+//
+// All three are motor degrees from where the claw sat at power-on, so 360 is
+// one full turn of the MOTOR shaft, not of the claw. How far the claw itself
+// swings depends on the gearing between them.
+// ---------------------------------------------------------------------------
+
+// Where spinclaw last sent the claw, and when it sent it. claw_update needs
+// both so it can tell "arrived" apart from "stuck".
+double claw_target = 0;
+uint32_t claw_move_started = 0;
+
 void spinclaw(int position) {
-  if (position == 0) {
-    claw_pivot.move_absolute(0, 100); // down
-  }
-  if (position == 1) {
-    claw_pivot.move_absolute(90, 100); // forward
-  }
-  if (position == 2) {
-    claw_pivot.move_absolute(120, 100); // back a bit further
-  }
+  if (position == 0) claw_target = 0;
+  if (position == 1) claw_target = 360;
+  if (position == 2) claw_target = 450;
+
+  claw_move_started = pros::millis();
+
+  // Second number is speed in RPM, not the -127..127 that move() takes.
+  // claw_pivot is a green cartridge, so anything over 200 is clamped to 200.
+  claw_pivot.move_absolute(claw_target, 100);
+}
+
+void claw_update() {
+  double error = claw_target - claw_pivot.get_position();
+  if (error < 0) error = -error; // distance, so ignore which side it is on
+
+  bool arrived = error < 5;
+  bool stuck = pros::millis() - claw_move_started > 1500;
+
+  // This is the fix for the creaking and the high pitched noise.
+  //
+  // move_absolute does not switch the motor off when it arrives -- it leaves
+  // the motor's internal position PID running, holding the target forever. If
+  // the claw is resting against anything, or the target is past where the claw
+  // can physically go, the motor sits there straining at full torque. That is
+  // the noise, and it will cook the motor if it is left doing it.
+  //
+  // So once it has arrived, or once it has clearly stopped making progress,
+  // cut the power. The brake mode is hold, so it still stays put.
+  if (arrived || stuck) claw_pivot.move(0);
 }

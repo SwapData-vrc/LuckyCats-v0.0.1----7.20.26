@@ -67,13 +67,18 @@ extern pros::Motor intake;         // 600 rpm intake: in (+) / out (-)
 const double LIFT_TICKS = 900;   // motor degrees from the bottom to the top
 const double LIFT_TRAVEL = 0.15; // where the lift rides while driving, 0 to 1
 
-/// Move the claw pivot to one of its three positions: 0 down, 1 forward,
-/// 2 further back. The angles themselves are in src/subsystems.cpp.
+/// Send the claw pivot to one of its three positions: 0 start, 1 360 degrees,
+/// 2 450 degrees. Does not block -- the claw is still moving when this returns.
 ///
 /// This is how another file gets at a function -- declare it here, in the
 /// header. Never #include a .cpp file: that pastes the whole file in and the
 /// linker then sees two copies of everything in it.
 void spinclaw(int position);
+
+/// Cuts power to the claw once it has arrived, so the motor does not sit
+/// straining against its target and whining. Call it every loop -- opcontrol
+/// does. Without it the claw creaks and squeals after every move.
+void claw_update();
 
 // ---------------------------------------------------------------------------
 // Device manifest

@@ -6,7 +6,7 @@
 // wrong and nobody could tell which from reading this file. Open the gearboxes
 // and confirm before trusting odometry, because the cartridge, the wheel size
 // and the drivetrain RPM below all scale distance directly.
-pros::MotorGroup left_motors({7, -5}, pros::MotorGearset::blue);  // 600 RPM cartridges
+pros::MotorGroup left_motors({-7, -5}, pros::MotorGearset::blue);  // 600 RPM cartridges
 pros::MotorGroup right_motors({4, 6}, pros::MotorGearset::blue);  // 600 RPM cartridges
 
 // drivetrain settings
@@ -104,10 +104,58 @@ lemlib::Chassis chassis(drivetrain, // drivetrain settings
 // the wrong mechanism.
 // ---------------------------------------------------------------------------
 
-pros::MotorGroup lift({1, -2}, pros::MotorGearset::green); // two lift motors, geared together
-pros::Motor claw_pivot(9, pros::MotorGearset::green);        // open / close, high torque
-pros::Motor claw_spin(11, pros::MotorGearset::green);      // claw roller: + grip, - release
-pros::Motor intake(12, pros::MotorGearset::blue);          // 600 rpm intake: + in, - out
+pros::MotorGroup lift({-1, 2}, pros::MotorGearset::green); // two lift motors, geared together
+pros::Motor claw_pivot(3, pros::MotorGearset::green);        // open / close, high torque
+pros::Motor claw_spin(-11, pros::MotorGearset::green);      // claw roller: + grip, - release
+pros::Motor intake(20, pros::MotorGearset::blue);          // 600 rpm intake: + in, - out
+
+// ---------------------------------------------------------------------------
+// Automatic claw
+//
+// The claw follows the lift, with no driver control at all: pointing down while
+// the lift is low, rotated 90 degrees clockwise once the lift is at least 5
+// inches above where it started.
+//
+// Heights are relative to power-on, which is only meaningful because
+// initialize() tares both motors. Without that tare, "the starting position is
+// zero" would be a hope rather than a fact.
+// ---------------------------------------------------------------------------
+
+double lift_height() { return lift.get_position() / LIFT_TICKS_PER_INCH; }
+
+void update_claw_for_lift() {
+  // Latched rather than recomputed from scratch, so the trigger and release
+  // heights actually give hysteresis instead of both being tested against the
+  // same instant.
+  static bool forward = false;
+  static bool commanded = false; // has the pivot been told anything yet?
+
+  const bool was = forward;
+  const double h = lift_height();
+  if (!forward && h >= CLAW_TRIGGER_IN) forward = true;
+  else if (forward && h < CLAW_RELEASE_IN) forward = false;
+
+  // Only on a change. move_absolute restarts the internal motion profile every
+  // time it is called, so re-issuing the same target at 50 Hz would keep the
+  // pivot permanently at the start of a profile and it would crawl.
+  if (forward == was && commanded) return;
+  commanded = true;
+  claw_pivot.move_absolute(forward ? CLAW_FORWARD_DEG : CLAW_DOWN_DEG, CLAW_PIVOT_SPEED);
+}
+
+namespace {
+void claw_daemon(void*) {
+  while (true) {
+    update_claw_for_lift();
+    pros::delay(20);
+  }
+}
+} // namespace
+
+void start_claw_daemon() {
+  static pros::Task t(claw_daemon, nullptr, "claw");
+  (void)t;
+}
 
 // ---------------------------------------------------------------------------
 // Device manifest, read by the boot check in auton::init().

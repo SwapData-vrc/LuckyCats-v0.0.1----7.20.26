@@ -146,7 +146,11 @@ enum class Kind : uint8_t {
   TURN,   // a = absolute heading, degrees
   GOTO,   // a,b = field point in inches; flag bit 0 = swerve
   INTAKE, // a = +1 in, -1 out, 0 stop
-  CLAW,   // a = 1 close/grip, 0 open/release
+  // There is deliberately no CLAW step. The pivot is driven entirely by lift
+  // height (see update_claw_for_lift) and a step that could command it would be
+  // a way to leave it disagreeing with where the lift actually is. Routes saved
+  // by an older build still containing a CLAW line will report an unknown step
+  // and skip it.
   LIFT,   // a = 0..1 target height
   WAIT,   // a = milliseconds
   SCORE,  // a = lift height 0..1; raise, eject off the back, return to travel
@@ -161,11 +165,6 @@ struct Step {
   float a, b;
   uint8_t flag;
 };
-
-/// Where the lift sits while driving, and full cascade travel in ticks. Kept in
-/// step with the copies in src/autons.cpp -- these are only used by the builder.
-constexpr float LIFT_TRAVEL = 0.15f;
-constexpr float LIFT_TICKS = 900.0f;
 
 /// Cap on the hand-built route.
 constexpr int MAX_STEPS = 20;
@@ -378,7 +377,6 @@ const char* kind_tag(Kind k) {
     case Kind::TURN: return "TURN";
     case Kind::GOTO: return "GOTO";
     case Kind::INTAKE: return "INTAKE";
-    case Kind::CLAW: return "CLAW";
     case Kind::LIFT: return "LIFT";
     case Kind::WAIT: return "WAIT";
     case Kind::SCORE: return "SCORE";
@@ -391,9 +389,9 @@ bool kind_from_tag(const char* s, Kind& out) {
     const char* tag;
     Kind k;
   };
-  static const Row rows[] = {{"DRIVE", Kind::DRIVE}, {"TURN", Kind::TURN},     {"GOTO", Kind::GOTO},
-                             {"INTAKE", Kind::INTAKE}, {"CLAW", Kind::CLAW}, {"LIFT", Kind::LIFT},
-                             {"WAIT", Kind::WAIT},     {"SCORE", Kind::SCORE}};
+  static const Row rows[] = {{"DRIVE", Kind::DRIVE},   {"TURN", Kind::TURN}, {"GOTO", Kind::GOTO},
+                             {"INTAKE", Kind::INTAKE}, {"LIFT", Kind::LIFT}, {"WAIT", Kind::WAIT},
+                             {"SCORE", Kind::SCORE}};
   for (const Row& r : rows) {
     if (std::strcmp(r.tag, s) == 0) {
       out = r.k;
@@ -430,6 +428,7 @@ void load_saved() {
   char line[128];
   int n = 0;
   int dropped = 0;
+  int unknown = 0;
   bool first = true;
   while (std::fgets(line, sizeof(line), f) != nullptr) {
     char* p = line;
@@ -465,11 +464,18 @@ void load_saved() {
       if (kind_from_tag(tag, k)) {
         if (n < MAX_STEPS) g_custom.s[n++] = Step{k, a, b, static_cast<uint8_t>(fl)};
         else ++dropped; // a hand-edited file can hold more steps than fit
+      } else {
+        // Most likely a CLAW step written by an older build, from before the
+        // pivot became automatic. Say so rather than quietly shortening the
+        // route -- a step that disappears without a word is how a route drives
+        // differently at an event than it did in the pits.
+        ++unknown;
       }
     }
   }
   g_custom.n = n;
   if (dropped > 0) logf("saved route truncated: %d steps over the %d limit", dropped, MAX_STEPS);
+  if (unknown > 0) logf("saved route: %d unknown steps skipped (CLAW is gone -- automatic now)", unknown);
   std::fclose(f);
 
   // A saved CUSTOM selection with nothing in it would leave the user staring at
@@ -509,7 +515,6 @@ void step_text(const Step& s, char* out, int n) {
     case Kind::INTAKE:
       std::snprintf(out, n, "Intake  %s", s.a > 0 ? "IN" : (s.a < 0 ? "OUT" : "STOP"));
       break;
-    case Kind::CLAW: std::snprintf(out, n, "Claw    %s", s.a > 0.5f ? "GRIP" : "RELEASE"); break;
     case Kind::LIFT: std::snprintf(out, n, "Lift    %.0f%%", static_cast<double>(s.a * 100.0f)); break;
     case Kind::WAIT: std::snprintf(out, n, "Wait    %.0f ms", static_cast<double>(s.a)); break;
     case Kind::SCORE: std::snprintf(out, n, "Score   at %.0f%%", static_cast<double>(s.a * 100.0f)); break;
@@ -547,7 +552,6 @@ constexpr uint32_t SCORE_EJECT_MS = 700;
 // the route estimate charges for them, which is why they are constants rather
 // than literals buried in begin_step.
 constexpr uint32_t INTAKE_MS = 420;
-constexpr uint32_t CLAW_MS = 360;
 constexpr uint32_t LIFT_MS = 650;
 
 struct Sim {
@@ -563,7 +567,7 @@ struct Sim {
   float lift;        // 0..1
   float lift_from, lift_to;
   int intake;    // -1 out, 0 stop, +1 in
-  bool claw;     // true = closed / gripping
+  bool claw;     // true = swung forward. Derived from `lift`, never set by a step.
   bool to_start; // pre-roll: sliding to a newly chosen start pose
   bool finished;
 };
@@ -650,10 +654,6 @@ void begin_step() {
       g_sim.intake = static_cast<int>(s.a);
       set_leg(g_sim.x, g_sim.y, g_sim.th, INTAKE_MS);
       break;
-    case Kind::CLAW:
-      g_sim.claw = (s.a > 0.5f);
-      set_leg(g_sim.x, g_sim.y, g_sim.th, CLAW_MS);
-      break;
     case Kind::LIFT:
       set_leg(g_sim.x, g_sim.y, g_sim.th, LIFT_MS);
       g_sim.lift_to = s.a; // after set_leg -- it resets lift_to to the current height
@@ -725,14 +725,13 @@ uint32_t route_ms() {
         th = wrap180(bear);
         break;
       }
-      // INTAKE, CLAW and LIFT cost nothing here on purpose. run_selected issues
+      // INTAKE and LIFT cost nothing here on purpose. run_selected issues
       // them and moves straight on -- move() and move_absolute() do not block,
       // and the waitUntilDone() that follows is waiting on the chassis, which
       // is not moving. The preview holds on them (INTAKE_MS and friends) only
       // so a person watching can see them happen; charging the estimate for
       // that dwell would put every route seconds over its real cost.
       case Kind::INTAKE:
-      case Kind::CLAW:
       case Kind::LIFT: break;
       case Kind::WAIT: total += static_cast<uint32_t>(s.a); break;
       case Kind::SCORE: total += SCORE_RAISE_MS + SCORE_EJECT_MS; break;
@@ -784,6 +783,14 @@ void apply_leg(float u) {
   g_sim.y = g_sim.sy + (g_sim.ty - g_sim.sy) * u;
   g_sim.th = g_sim.sth + g_sim.dth * u;
   g_sim.lift = g_sim.lift_from + (g_sim.lift_to - g_sim.lift_from) * u;
+
+  // The claw is not a step any more, so the preview derives it the same way the
+  // robot does: forward once the lift is CLAW_TRIGGER_IN above the bottom, back
+  // down below CLAW_RELEASE_IN. Same two thresholds, same latch, so what is on
+  // the screen is what the robot will do.
+  const float h_in = g_sim.lift * static_cast<float>(LIFT_FULL_TRAVEL_IN);
+  if (!g_sim.claw && h_in >= static_cast<float>(CLAW_TRIGGER_IN)) g_sim.claw = true;
+  else if (g_sim.claw && h_in < static_cast<float>(CLAW_RELEASE_IN)) g_sim.claw = false;
 }
 
 /// True once the current leg's clock has run out. Advances that clock.
@@ -1540,12 +1547,11 @@ void add_cb(lv_event_t* e) {
     case 1: push_step(Kind::TURN, 90.0f); break;
     case 2: push_step(Kind::INTAKE, 1.0f); break;
     case 3: push_step(Kind::INTAKE, -1.0f); break;
-    case 4: push_step(Kind::CLAW, 1.0f); break;
-    case 5: push_step(Kind::CLAW, 0.0f); break;
-    case 6: push_step(Kind::LIFT, 0.8f); break;
-    case 7: push_step(Kind::LIFT, 0.0f); break;
-    case 8: push_step(Kind::WAIT, 500.0f); break;
-    case 9: push_step(Kind::SCORE, 0.45f); break;
+    // No claw entries: the pivot follows the lift and is not commandable.
+    case 4: push_step(Kind::LIFT, 0.8f); break;
+    case 5: push_step(Kind::LIFT, 0.0f); break;
+    case 6: push_step(Kind::WAIT, 500.0f); break;
+    case 7: push_step(Kind::SCORE, 0.45f); break;
     default: break;
   }
   lv_dropdown_set_selected(dd, 0);
@@ -1585,7 +1591,6 @@ void step_cb(lv_event_t* e) {
     }
     case Kind::GOTO: s.flag ^= F_SWERVE; break; // toggle turn-then-drive vs arc
     case Kind::INTAKE: s.a = (s.a > 0) ? -1.0f : ((s.a < 0) ? 0.0f : 1.0f); break;
-    case Kind::CLAW: s.a = (s.a > 0.5f) ? 0.0f : 1.0f; break;
     case Kind::LIFT: s.a = (s.a >= 0.79f) ? 0.0f : s.a + 0.4f; break;
     case Kind::WAIT: s.a = (s.a >= 1900.0f) ? 250.0f : s.a * 2.0f; break;
     case Kind::SCORE: s.a = (s.a >= 0.79f) ? 0.30f : s.a + 0.15f; break;
@@ -2007,7 +2012,7 @@ void build_edit(lv_obj_t* scr) {
   make_header(card, "DESIGN", true);
 
   g_dd_add = make_dropdown(card, 0, 32, COL_W,
-                           "Drive\nTurn\nIntake in\nIntake out\nClaw grip\nClaw release\n"
+                           "Drive\nTurn\nIntake in\nIntake out\n"
                            "Lift up\nLift down\nWait\nScore",
                            add_cb);
   lv_dropdown_set_text(g_dd_add, "+   Add step");
@@ -2702,10 +2707,9 @@ void run_selected() {
         intake.move(static_cast<int>(s.a) * 127);
         claw_spin.move(static_cast<int>(s.a) * 127);
         break;
-      case Kind::CLAW:
-        claw_pivot.move_absolute(s.a > 0.5f ? 0 : 400, 100);
-        break;
       case Kind::LIFT:
+        // The claw pivot is not touched here -- the background task started in
+        // initialize() follows the lift on its own.
         lift.move_absolute(s.a * LIFT_TICKS, 100);
         break;
       case Kind::WAIT:
@@ -2724,6 +2728,7 @@ void run_selected() {
         claw_spin.move(0);
         lift.move_absolute(LIFT_TRAVEL * LIFT_TICKS, 100);
         break;
+      // LIFT and SCORE call update_claw_for_lift() themselves, above.
     }
     chassis.waitUntilDone();
     logf("%2d/%d  %s", i + 1, n, step_desc(s));

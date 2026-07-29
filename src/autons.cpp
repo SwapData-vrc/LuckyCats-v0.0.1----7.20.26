@@ -56,13 +56,16 @@ constexpr double PI = 3.14159265358979;
 // repeating.
 // ---------------------------------------------------------------------------
 
-/// Where the lift sits while driving: clear of the field, not extended.
-constexpr double LIFT_TRAVEL = 0.15;
+// LIFT_TRAVEL, LIFT_TICKS and the claw angles live in subsystems.hpp -- they
+// describe the hardware, and keeping a second copy here is how a drivetrain
+// motor once ended up in the lift group.
 
-/// Encoder ticks for a full cascade extension.
-/// TODO: measure this. Every lift height below is a fraction of it.
-constexpr double LIFT_TICKS = 900.0;
-
+/// Command the lift to a fraction of full travel. Does not block: the lift is
+/// still moving when this returns.
+///
+/// Nothing here touches the claw pivot. It follows the lift on its own, from a
+/// background task started in initialize(), so a routine cannot get it out of
+/// step with the lift by forgetting a call.
 void lift_to(double height) { lift.move_absolute(height * LIFT_TICKS, 100); }
 
 /// Reverse into a Goal and eject. Assumes the robot is already squared up with
@@ -82,6 +85,7 @@ void score_backwards(double into_inches, double height) {
   intake.move(0);
   claw_spin.move(0);
   lift_to(LIFT_TRAVEL);
+  pros::delay(400);
 }
 
 // ---------------------------------------------------------------------------

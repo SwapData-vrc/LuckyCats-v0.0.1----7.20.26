@@ -1,7 +1,7 @@
 # LuckyCats selector state, format 1. Safe to edit by hand;
 # unrecognised lines are ignored. Delete the file to reset.
-alliance 0
-route 0
-start 0
-blackout 1
+alliance 1
+route 1
+start 2
+blackout 0
 customstart -52.00 0.00 90.00

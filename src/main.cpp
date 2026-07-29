@@ -14,8 +14,22 @@
  * one on top of it.
  */
 void initialize() {
-  chassis.calibrate();  // calibrate sensors
-  auton::init();        // touchscreen route selector + field preview
+  chassis.calibrate(); // calibrate sensors
+
+  // Zero the lift and the claw pivot where they are sitting right now.
+  // Everything that reads a lift height or commands a claw angle is relative to
+  // this, so the robot has to be powered on with the lift down and the claw
+  // pointing down. Without this tare, "the starting position is zero" would be
+  // a hope rather than a fact.
+  lift.tare_position();
+  claw_pivot.tare_position();
+
+  // From here the claw pivot is nobody's business but its own: this task points
+  // it forward whenever the lift is 5 inches or more above where it started and
+  // straight down otherwise, in every mode.
+  start_claw_daemon();
+
+  auton::init(); // touchscreen route selector + field preview
 }
 
 /**
@@ -75,14 +89,14 @@ void opcontrol() {
   claw_spin.set_brake_mode(pros::MotorBrake::coast);
 
   while (true) {
-    // TANK control scheme
+    // arcade control scheme
 
-    // get left y and right y positions
+    // get left y and right x positions
     int leftY = master.get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y);
-    int rightY = master.get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_Y);
+    int rightX = master.get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_X);
 
     // move the robot
-    chassis.tank(leftY, rightY);
+    chassis.arcade(leftY, rightX);
 
     // ---- manipulator -------------------------------------------------------
     // TODO: confirm these mappings with whoever is driving. The ports they act
@@ -93,12 +107,12 @@ void opcontrol() {
     if (master.get_digital(pros::E_CONTROLLER_DIGITAL_R1)) {
       intake.move(127);
       claw_spin.move(127);
-    } 
-    
+    }
+
     else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_R2)) {
       intake.move(-127);
-             claw_spin.move(-127);
-    } 
+      claw_spin.move(-127);
+    }
 
     else {
       intake.move(0);
@@ -107,14 +121,17 @@ void opcontrol() {
 
     // L1 / L2: lift up / down. Held rather than latched, so letting go stops it
     // where it is rather than running it into a hard stop.
-    if (master.get_digital(pros::E_CONTROLLER_DIGITAL_L1)) lift.move(110);
-    else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_L2)) lift.move(-90);
-    else lift.brake();
+    if (master.get_digital(pros::E_CONTROLLER_DIGITAL_L1))
+      lift.move(110);
+    else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_L2))
+      lift.move(-90);
+    else
+      lift.brake();
 
-    // X / B: claw open / closed.
-    if (master.get_digital(pros::E_CONTROLLER_DIGITAL_X)) claw_pivot.move(90);
-    else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_B)) claw_pivot.move(-90);
-    else claw_pivot.brake();
+    // The claw pivot is fully automatic and has no button. X and B used to
+    // override it while held; they are deliberately gone, and the pivot is
+    // driven by start_claw_daemon() instead, so there is no way to leave it
+    // somewhere the lift height does not agree with.
 
     // A toggles route recording: drive the route by hand, press A again, and
     // the driven path lands in the Custom slot as GOTO steps.

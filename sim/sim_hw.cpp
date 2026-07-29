@@ -29,6 +29,10 @@ namespace {
 
 constexpr float PI_F = 3.14159265358979f;
 
+/// Ticks per second at full command in voltage mode. A made-up rate, like
+/// everything else about motion here.
+constexpr double VOLTAGE_TICKS_PER_S = 600.0;
+
 std::chrono::steady_clock::time_point g_boot = std::chrono::steady_clock::now();
 
 /// Per-motor state, indexed by the handle each Motor/MotorGroup is given.
@@ -66,10 +70,18 @@ bool focused();
 void tick_motors(double dt) {
   std::lock_guard<std::mutex> lk(g_motor_m);
   for (MotorState& m : g_motors) {
-    if (!m.position_mode) continue;
-    const double delta = m.target - m.position;
-    const double step = m.speed * dt;
-    m.position = (std::fabs(delta) <= step) ? m.target : m.position + (delta > 0 ? step : -step);
+    if (m.position_mode) {
+      const double delta = m.target - m.position;
+      const double step = m.speed * dt;
+      m.position = (std::fabs(delta) <= step) ? m.target : m.position + (delta > 0 ? step : -step);
+    } else {
+      // Voltage mode used to leave the position frozen, so a lift held up on
+      // L1 never reported having moved and anything keyed off lift height --
+      // the automatic claw, for one -- could not be exercised here at all.
+      // Integrating the command is crude but it is the difference between
+      // testable and not.
+      m.position += (m.voltage / 127.0) * VOLTAGE_TICKS_PER_S * dt;
+    }
   }
 }
 
@@ -104,6 +116,12 @@ void Motor::brake() { move(0); }
 // Accepted and discarded: nothing here coasts, so there is no difference to
 // model between hold and coast. It exists so robot code compiles unchanged.
 void Motor::set_brake_mode(MotorBrake) {}
+
+void Motor::tare_position() {
+  std::lock_guard<std::mutex> lk(g_motor_m);
+  g_motors[idx_].position = 0;
+  g_motors[idx_].target = 0;
+}
 
 double Motor::get_position() const {
   std::lock_guard<std::mutex> lk(g_motor_m);
@@ -140,6 +158,12 @@ void MotorGroup::move_absolute(double position, int velocity) {
 
 void MotorGroup::brake() { move(0); }
 void MotorGroup::set_brake_mode(MotorBrake) {}
+
+void MotorGroup::tare_position() {
+  std::lock_guard<std::mutex> lk(g_motor_m);
+  g_motors[idx_].position = 0;
+  g_motors[idx_].target = 0;
+}
 
 std::vector<std::int8_t> MotorGroup::get_port_all() const { return ports_; }
 

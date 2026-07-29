@@ -65,17 +65,15 @@ extern pros::Motor intake;         // 600 rpm intake: in (+) / out (-)
 // ---------------------------------------------------------------------------
 
 const double LIFT_TICKS = 900;   // motor degrees from the bottom to the top
-const double LIFT_INCHES = 24;   // how many inches that actually lifts
 const double LIFT_TRAVEL = 0.15; // where the lift rides while driving, 0 to 1
 
-const double CLAW_DOWN = 0;     // claw degrees, pointing down
-const double CLAW_FORWARD = 90; // claw degrees, 90 clockwise, pointing forward
-
-// The rule: 5 inches up or more and the claw points forward, else it points
-// down. It comes back down at 4.5 and not 5 so that a lift sitting right on the
-// line cannot flick the claw back and forth 50 times a second.
-const double CLAW_UP_INCHES = 5.0;
-const double CLAW_DOWN_INCHES = 4.5;
+/// Move the claw pivot to one of its three positions: 0 down, 1 forward,
+/// 2 further back. The angles themselves are in src/subsystems.cpp.
+///
+/// This is how another file gets at a function -- declare it here, in the
+/// header. Never #include a .cpp file: that pastes the whole file in and the
+/// linker then sees two copies of everything in it.
+void spinclaw(int position);
 
 // ---------------------------------------------------------------------------
 // Device manifest

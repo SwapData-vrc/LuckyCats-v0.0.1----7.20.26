@@ -146,11 +146,10 @@ enum class Kind : uint8_t {
   TURN,   // a = absolute heading, degrees
   GOTO,   // a,b = field point in inches; flag bit 0 = swerve
   INTAKE, // a = +1 in, -1 out, 0 stop
-  // There is deliberately no CLAW step. The pivot is driven entirely by lift
-  // height (see claw_task in main.cpp) and a step that could command it would be
-  // a way to leave it disagreeing with where the lift actually is. Routes saved
-  // by an older build still containing a CLAW line will report an unknown step
-  // and skip it.
+  // There is no CLAW step. A hand-built route cannot move the claw -- write a
+  // routine in autons.cpp and call spinclaw() if you need that. Routes saved by
+  // an older build still containing a CLAW line report an unknown step and skip
+  // it.
   LIFT,   // a = 0..1 target height
   WAIT,   // a = milliseconds
   SCORE,  // a = lift height 0..1; raise, eject off the back, return to travel
@@ -784,12 +783,10 @@ void apply_leg(float u) {
   g_sim.th = g_sim.sth + g_sim.dth * u;
   g_sim.lift = g_sim.lift_from + (g_sim.lift_to - g_sim.lift_from) * u;
 
-  // The claw is not a step any more, so the preview works it out the same way
-  // claw_task does on the robot: same two heights, same latch, so what is on
-  // the screen is what the robot will do.
-  float inches = g_sim.lift * static_cast<float>(LIFT_INCHES);
-  if (!g_sim.claw && inches >= static_cast<float>(CLAW_UP_INCHES)) g_sim.claw = true;
-  else if (g_sim.claw && inches < static_cast<float>(CLAW_DOWN_INCHES)) g_sim.claw = false;
+  // g_sim.claw is left alone. The claw is on a driver button now, so a route
+  // has nothing to say about where it is and the preview would only be
+  // guessing. A routine that calls spinclaw() moves the real claw without the
+  // preview knowing -- that is the honest state of it, not an oversight.
 }
 
 /// True once the current leg's clock has run out. Advances that clock.
@@ -2727,7 +2724,7 @@ void run_selected() {
         claw_spin.move(0);
         lift.move_absolute(LIFT_TRAVEL * LIFT_TICKS, 100);
         break;
-      // Nothing here moves the claw -- claw_task in main.cpp does that.
+      // Nothing here moves the claw -- no step can.
     }
     chassis.waitUntilDone();
     logf("%2d/%d  %s", i + 1, n, step_desc(s));

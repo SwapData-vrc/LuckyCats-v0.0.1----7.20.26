@@ -105,12 +105,12 @@ lemlib::Chassis chassis(drivetrain, // drivetrain settings
 // ---------------------------------------------------------------------------
 
 pros::MotorGroup lift({-1, 2}, pros::MotorGearset::green); // two lift motors, geared together
-pros::Motor claw_pivot(3, pros::MotorGearset::green);        // open / close, high torque
-pros::Motor claw_spin(-11, pros::MotorGearset::green);      // claw roller: + grip, - release
+pros::Motor claw_pivot(-11, pros::MotorGearset::green);        // open / close, high torque
+pros::Motor claw_spin(3, pros::MotorGearset::green);      // claw roller: + grip, - release
 pros::Motor intake(20, pros::MotorGearset::blue);          // 600 rpm intake: + in, - out
 
-// The claw is not controlled from this file. It follows the lift, and that is
-// written out in the claw_task function in main.cpp.
+// The claw pivot is moved by spinclaw(), at the bottom of this file. The driver
+// steps through its positions with B -- see opcontrol in main.cpp.
 
 // ---------------------------------------------------------------------------
 // Device manifest, read by the boot check in auton::init().
@@ -142,3 +142,21 @@ const MotorRef MOTORS[] = {
 const int MOTOR_COUNT = static_cast<int>(sizeof(MOTORS) / sizeof(MOTORS[0]));
 
 //TODO: add more subsystems
+
+// Move the claw pivot to one of three positions. The caller keeps track of
+// which one it is on and wraps 2 back round to 0 -- see opcontrol in main.cpp.
+//
+// The second number is the speed in RPM, not the -127..127 you use with
+// move(). claw_pivot is a green cartridge, so anything over 200 is just
+// clamped to 200.
+void spinclaw(int position) {
+  if (position == 0) {
+    claw_pivot.move_absolute(0, 100); // down
+  }
+  if (position == 1) {
+    claw_pivot.move_absolute(90, 100); // forward
+  }
+  if (position == 2) {
+    claw_pivot.move_absolute(120, 100); // back a bit further
+  }
+}

@@ -215,16 +215,16 @@ Work in progress. Known placeholders, in rough order of how much they matter:
 - `LIFT_TICKS` in `include/subsystems.hpp` is a guess at full cascade travel.
   Every lift height is a fraction of it, so it is the single number to measure
   first.
-- `LIFT_INCHES` is a guess at how far that actually lifts, in inches. The
-  automatic claw switches at 5 inches, and "5 inches" means nothing until this
-  is measured with a tape.
-- Claw-pivot down/forward positions are unmeasured guesses, and they are in
-  MOTOR degrees — if the pivot is geared, 90 at the shaft is not 90 at the claw.
+- The three claw-pivot angles in `spinclaw()` (0, 90, 120) are unmeasured
+  guesses, and they are in MOTOR degrees — if the pivot is geared, 90 at the
+  shaft is not 90 at the claw.
 - Field coordinates in `src/field.cpp` — goals, toggles, loaders — are estimates,
   not published numbers. Measure before writing routes against them.
 - Driver controls exist but the button mapping is a guess (R1/R2 intake, L1/L2
-  lift). Confirm it with whoever is driving. The claw has no button — it is
-  automatic (`claw_task` in `src/main.cpp`).
+  lift, B steps the claw through its three positions). Confirm it with whoever
+  is driving.
+- Nothing moves the claw during autonomous. Routes have no CLAW step; a routine
+  in `src/autons.cpp` has to call `spinclaw()` itself.
 - The drivetrain cartridge, wheel size and RPM in `src/subsystems.cpp` are all
   marked UNVERIFIED. They scale odometry directly — check them before tuning.
 

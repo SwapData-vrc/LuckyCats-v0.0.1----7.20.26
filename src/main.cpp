@@ -1,44 +1,12 @@
+
+
 #include "main.h"
 #include "auton_selector.hpp" // IWYU pragma: keep
 #include "lemlib/api.hpp"     // IWYU pragma: keep
 #include "subsystems.hpp"     // IWYU pragma: keep
 
-/**
- * The claw follows the lift, and nothing else is allowed to move it.
- *
- * If the lift is 5 inches or more above where it started, the claw points
- * forward (90 degrees clockwise). Otherwise it points down (0 degrees).
- *
- * This runs in its own task so it keeps working in autonomous as well as
- * driver control. If the check lived in the opcontrol loop instead, the claw
- * would stop following the lift during autonomous.
- */
-void claw_task(void* param) {
-  bool forward = false;
-
-  // How many motor degrees the lift turns for one inch of height.
-  double degrees_per_inch = LIFT_TICKS / LIFT_INCHES;
-
-  // Put the claw down to start with, so it is somewhere known.
-  claw_pivot.move_absolute(CLAW_DOWN, 100);
-
-  while (true) {
-    double inches = lift.get_position() / degrees_per_inch;
-
-    // Only send a new command when the claw actually needs to swap sides.
-    // move_absolute starts its move over every time it is called, so sending
-    // the same target 50 times a second would make the claw crawl.
-    if (!forward && inches >= CLAW_UP_INCHES) {
-      forward = true;
-      claw_pivot.move_absolute(CLAW_FORWARD, 100);
-    } else if (forward && inches < CLAW_DOWN_INCHES) {
-      forward = false;
-      claw_pivot.move_absolute(CLAW_DOWN, 100);
-    }
-
-    pros::delay(20);
-  }
-}
+// Which of spinclaw's three positions the claw is on. B steps through them.
+int claw_position = 0;
 
 /**
  * Runs initialization code. This occurs as soon as the program is started.
@@ -54,16 +22,11 @@ void initialize() {
   chassis.calibrate(); // calibrate sensors
 
   // Zero the lift and the claw pivot where they are sitting right now.
-  // Everything that reads a lift height or commands a claw angle is relative to
-  // this, so the robot has to be powered on with the lift down and the claw
-  // pointing down. Without this tare, "the starting position is zero" would be
-  // a hope rather than a fact.
+  // spinclaw's positions are all measured from this zero, so the robot has to
+  // be powered on with the lift down and the claw pointing down. Without this
+  // tare, "position 0 is down" would be a hope rather than a fact.
   lift.tare_position();
   claw_pivot.tare_position();
-
-  // Start the claw task. It keeps running after initialize() finishes -- the
-  // pros::Task destructor does not stop the task.
-  pros::Task claw(claw_task);
 
   auton::init(); // touchscreen route selector + field preview
 }
@@ -138,6 +101,18 @@ void opcontrol() {
     // TODO: confirm these mappings with whoever is driving. The ports they act
     // on are still placeholders -- see src/subsystems.cpp.
 
+
+    // B steps the claw to its next position and wraps back round at the end.
+    //
+    // The wrap has to happen HERE, not inside spinclaw. spinclaw takes its
+    // argument by value, so setting `position = 0` in there changes only
+    // spinclaw's own copy and claw_position keeps climbing -- 3, 4, 5 -- until
+    // no branch matches and the claw stops responding.
+    if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_B)) {
+      claw_position = claw_position + 1;
+      if (claw_position > 2) claw_position = 0;
+      spinclaw(claw_position);
+    }
     // R1 / R2: intake in / out. The intake is on the front, scoring is off the
     // back, so "out" is what pushes a load into a Goal.
     if (master.get_digital(pros::E_CONTROLLER_DIGITAL_R1)) {
@@ -163,8 +138,6 @@ void opcontrol() {
       lift.move(-90);
     else
       lift.brake();
-
-    // There is no claw button. claw_task does it all.
 
     // A toggles route recording: drive the route by hand, press A again, and
     // the driven path lands in the Custom slot as GOTO steps.

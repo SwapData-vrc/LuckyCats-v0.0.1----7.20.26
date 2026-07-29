@@ -55,8 +55,8 @@ constexpr double PI = 3.14159265358979;
 // Shared helpers. Ordinary functions -- add whatever you find yourself
 // repeating.
 //
-// Nothing here ever moves the claw. claw_task in main.cpp does that on its own
-// from the lift height, so a routine cannot get the two out of step.
+// The claw does not move by itself. If a routine needs it somewhere, call
+// spinclaw(0), spinclaw(1) or spinclaw(2) -- down, forward, further back.
 // ---------------------------------------------------------------------------
 
 /// Reverse into a Goal and eject. Assumes the robot is already squared up with

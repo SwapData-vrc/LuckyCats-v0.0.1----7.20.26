@@ -1,131 +1,56 @@
 #include "subsystems.hpp" // IWYU pragma: keep
 
+// !! UNVERIFIED: cartridge, wheel size and drivetrain RPM all scale odometry
+// distance directly. Open the gearboxes and count the teeth before trusting it.
+pros::MotorGroup left_motors({-7, -5}, pros::MotorGearset::blue);
+pros::MotorGroup right_motors({4, 6}, pros::MotorGearset::blue);
 
-// !! UNVERIFIED: both groups are declared blue (600 RPM). The right-hand
-// comment used to say 200 RPM, which is a green cartridge -- one of the two was
-// wrong and nobody could tell which from reading this file. Open the gearboxes
-// and confirm before trusting odometry, because the cartridge, the wheel size
-// and the drivetrain RPM below all scale distance directly.
-pros::MotorGroup left_motors({-7, -5}, pros::MotorGearset::blue);  // 600 RPM cartridges
-pros::MotorGroup right_motors({4, 6}, pros::MotorGearset::blue);  // 600 RPM cartridges
-
-// drivetrain settings
-lemlib::Drivetrain drivetrain(&left_motors, // left motor group
-                              &right_motors, // right motor group
-                              10, // 10 inch track width
-                              // NEW_325 is a 3.25" omni. The comment here used
-                              // to say 4", which would be lemlib::Omniwheel::NEW_4.
-                              // !! UNVERIFIED -- measure the actual wheel.
-                              lemlib::Omniwheel::NEW_325,
-                              // Wheel RPM after external gearing, not cartridge
-                              // RPM. 360 off a 600 RPM cartridge means a 5:3
-                              // reduction. !! UNVERIFIED -- count the teeth.
-                              360,
-                              2 // horizontal drift is 2 (for now)
+lemlib::Drivetrain drivetrain(&left_motors,
+                              &right_motors,
+                              10,                        // track width, inches
+                              lemlib::Omniwheel::NEW_325, // wheel
+                              360,                       // wheel RPM after gearing
+                              2                          // horizontal drift
 );
 
+// !! PORT 20 IS CLAIMED TWICE. device_check() only PRINTS this -- nothing
+// refuses to start, so the robot will happily run a match with the horizontal
+// tracking wheel reading PROS_ERR and odometry garbage. Move one of them; port
+// 10 is free.
+pros::Imu imu(20);
 
-// imu
-pros::Imu imu(10);
-// horizontal tracking wheel encoder
 pros::Rotation horizontal_encoder(20);
-// vertical tracking wheel encoder
+
 pros::adi::Encoder vertical_encoder('C', 'D', true);
-// horizontal tracking wheel
+
 lemlib::TrackingWheel horizontal_tracking_wheel(&horizontal_encoder, lemlib::Omniwheel::NEW_275, -5.75);
-// vertical tracking wheel
+
 lemlib::TrackingWheel vertical_tracking_wheel(&vertical_encoder, lemlib::Omniwheel::NEW_275, -2.5);
 
-// odometry settings
-//
-// The comments here were left over from the LemLib template and described a
-// setup this robot does not have -- they said the first wheel was null when it
-// is not, and that the second was omitted because we use IMEs when in fact we
-// use tracking wheels. Corrected to describe what is actually wired.
-lemlib::OdomSensors sensors(&vertical_tracking_wheel,   // vertical tracking wheel 1
-                            nullptr,                    // vertical tracking wheel 2 -- only one fitted
-                            &horizontal_tracking_wheel, // horizontal tracking wheel 1
-                            nullptr,                    // horizontal tracking wheel 2 -- only one fitted
-                            &imu                        // inertial sensor
+lemlib::OdomSensors sensors(&vertical_tracking_wheel,
+                            nullptr,
+                            &horizontal_tracking_wheel,
+                            nullptr,
+                            &imu
 );
 
-// lateral PID controller
-lemlib::ControllerSettings lateral_controller(10, // proportional gain (kP)
-                                              0, // integral gain (kI)
-                                              3, // derivative gain (kD)
-                                              3, // anti windup
-                                              1, // small error range, in inches
-                                              100, // small error range timeout, in milliseconds
-                                              3, // large error range, in inches
-                                              500, // large error range timeout, in milliseconds
-                                              20 // maximum acceleration (slew)
+// kP, kI, kD, anti-windup, small error (in), small timeout (ms),
+// large error (in), large timeout (ms), slew
+lemlib::ControllerSettings lateral_controller(10, 0, 3, 3, 1, 100, 3, 500, 20);
+
+// same order, but the error ranges are in degrees
+lemlib::ControllerSettings angular_controller(2, 0, 10, 3, 1, 100, 3, 500, 0);
+
+lemlib::Chassis chassis(drivetrain,
+                        lateral_controller,
+                        angular_controller,
+                        sensors
 );
 
-// angular PID controller
-lemlib::ControllerSettings angular_controller(2, // proportional gain (kP)
-                                              0, // integral gain (kI)
-                                              10, // derivative gain (kD)
-                                              3, // anti windup
-                                              1, // small error range, in degrees
-                                              100, // small error range timeout, in milliseconds
-                                              3, // large error range, in degrees
-                                              500, // large error range timeout, in milliseconds
-                                              0 // maximum acceleration (slew)
-);
-
-// create the chassis
-//
-// Drive curves go here if they are wanted, as two more arguments:
-//
-//   lemlib::ExpoDriveCurve throttle_curve(3, 10, 1.019);
-//   lemlib::ExpoDriveCurve steer_curve(3, 10, 1.019);
-//   lemlib::Chassis chassis(drivetrain, lateral_controller, angular_controller,
-//                           sensors, &throttle_curve, &steer_curve);
-//
-// A commented-out version of that used to sit inside the while loop in
-// opcontrol(), where uncommenting it would have constructed a second Chassis
-// forty times a second. It belongs beside the real one, at file scope.
-lemlib::Chassis chassis(drivetrain, // drivetrain settings
-                        lateral_controller, // lateral PID settings
-                        angular_controller, // angular PID settings
-                        sensors // odometry sensors
-);
-
-// ---------------------------------------------------------------------------
-// Manipulator
-//
-// Ports in use: 1, 2 lift -- 4, 5, 6, 7 drivetrain -- 9 claw pivot --
-// 10 IMU -- 11 claw roller -- 12 intake -- 20 rotation.
-// Free: 3, 8, 13-19. Negative port = motor reversed.
-//
-// TODO: claw and intake ports are still guesses. The boot check reports a port
-// that is empty or holds the wrong device type, and refuses to start if two
-// subsystems claim the same port -- but it cannot tell you a motor is wired to
-// the wrong mechanism.
-// ---------------------------------------------------------------------------
-
-pros::MotorGroup lift({-1, 2}, pros::MotorGearset::green); // two lift motors, geared together
-pros::Motor claw_pivot(-11, pros::MotorGearset::green);        // open / close, high torque
-pros::Motor claw_spin(3, pros::MotorGearset::green);      // claw roller: + grip, - release
-pros::Motor intake(20, pros::MotorGearset::blue);          // 600 rpm intake: + in, - out
-
-// The claw pivot is moved by spinclaw(), at the bottom of this file. The driver
-// steps through its positions with B -- see opcontrol in main.cpp.
-
-// ---------------------------------------------------------------------------
-// Device manifest, read by the boot check in auton::init().
-//
-// Names only. The ports come from the objects themselves at runtime, so this
-// cannot disagree with the constructors above.
-//
-// It used to be a second table of literal port numbers and it drifted the first
-// time the wiring changed -- it still called the lift's ports "drive L1" and
-// "drive L2" after the drivetrain had moved. A list that can be wrong about the
-// hardware is worse than no list at all.
-//
-// The ADI encoder on 'C'/'D' is not a smart port and cannot be probed, so it is
-// deliberately absent.
-// ---------------------------------------------------------------------------
+pros::MotorGroup lift({-18, 2}, pros::MotorGearset::green);
+pros::Motor claw_pivot(-3, pros::MotorGearset::green);
+pros::Motor claw_spin(11, pros::MotorGearset::green);
+pros::Motor intake(9, pros::MotorGearset::blue);
 
 const MotorGroupRef MOTOR_GROUPS[] = {
     {"drive left", &left_motors},
@@ -141,51 +66,29 @@ const MotorRef MOTORS[] = {
 };
 const int MOTOR_COUNT = static_cast<int>(sizeof(MOTORS) / sizeof(MOTORS[0]));
 
-//TODO: add more subsystems
-
-// ---------------------------------------------------------------------------
-// Claw pivot
-//
-// Three positions, cycled with B: start -> 360 -> 450 -> start.
-//
-// All three are motor degrees from where the claw sat at power-on, so 360 is
-// one full turn of the MOTOR shaft, not of the claw. How far the claw itself
-// swings depends on the gearing between them.
-// ---------------------------------------------------------------------------
-
-// Where spinclaw last sent the claw, and when it sent it. claw_update needs
-// both so it can tell "arrived" apart from "stuck".
 double claw_target = 0;
 uint32_t claw_move_started = 0;
 
 void spinclaw(int position) {
   if (position == 0) claw_target = 0;
-  if (position == 1) claw_target = 360;
-  if (position == 2) claw_target = 450;
+  if (position == 1) claw_target = -925;
+  if (position == 2) claw_target = -1350;
 
   claw_move_started = pros::millis();
 
-  // Second number is speed in RPM, not the -127..127 that move() takes.
-  // claw_pivot is a green cartridge, so anything over 200 is clamped to 200.
-  claw_pivot.move_absolute(claw_target, 100);
+  claw_pivot.move_absolute(claw_target, 1000);
 }
 
 void claw_update() {
   double error = claw_target - claw_pivot.get_position();
-  if (error < 0) error = -error; // distance, so ignore which side it is on
+  if (error < 0) error = -error;
 
   bool arrived = error < 5;
   bool stuck = pros::millis() - claw_move_started > 1500;
 
-  // This is the fix for the creaking and the high pitched noise.
-  //
-  // move_absolute does not switch the motor off when it arrives -- it leaves
-  // the motor's internal position PID running, holding the target forever. If
-  // the claw is resting against anything, or the target is past where the claw
-  // can physically go, the motor sits there straining at full torque. That is
-  // the noise, and it will cook the motor if it is left doing it.
-  //
-  // So once it has arrived, or once it has clearly stopped making progress,
-  // cut the power. The brake mode is hold, so it still stays put.
   if (arrived || stuck) claw_pivot.move(0);
 }
+
+
+
+ pros::Optical optical_sensor(1);

@@ -3,17 +3,6 @@
 #include <cmath>
 
 namespace field {
-
-// ===========================================================================
-//  COORDINATE TABLES -- everything positional lives here, in inches from the
-//  field centre. These are a best reading of the Override field; VEX does not
-//  publish machine-readable coordinates. Correct the numbers below and the
-//  rest of the program follows automatically.
-//
-//  Convention used: RED Alliance Station is the WEST wall (-X side),
-//                   BLUE Alliance Station is the EAST wall (+X side).
-// ===========================================================================
-
 namespace col {
 constexpr uint32_t TILE_A = 0x55595e;
 constexpr uint32_t TILE_B = 0x50545a;
@@ -26,31 +15,28 @@ constexpr uint32_t BLUE = 0x3d74d0;
 constexpr uint32_t YELLOW = 0xe3c341;
 constexpr uint32_t GRAY_CUP = 0x9aa1a9;
 constexpr uint32_t CLEAR_CUP = 0xd8e2ea;
-constexpr uint32_t GOAL_N = 0xb9c2cc; // neutral goal
+constexpr uint32_t GOAL_N = 0xb9c2cc;
 constexpr uint32_t GOAL_DK = 0x6b737c;
 constexpr uint32_t LOADER = 0x2f3742;
 constexpr uint32_t SHADOW = 0x000000;
-constexpr uint32_t SELECT = 0x4cc9f0; // matches ink::ACCENT in auton_selector
-} // namespace col
+constexpr uint32_t SELECT = 0x4cc9f0;
+}
 
-// --- Goals: 4 neutral Short, 1 neutral Tall, 2 red Alliance, 2 blue Alliance
 const Goal goals[GOAL_COUNT] = {
-    // neutral Tall goal, field centre -- needs the lift high
     {0.0f, 0.0f, 7.0f, 7.0f, GoalKind::TALL, Alliance::NEUTRAL, 0.75f},
-    // neutral Short goals, one per quadrant
+
     {0.0f, 40.0f, 8.0f, 6.0f, GoalKind::SHORT, Alliance::NEUTRAL, 0.30f},
     {0.0f, -40.0f, 8.0f, 6.0f, GoalKind::SHORT, Alliance::NEUTRAL, 0.30f},
     {40.0f, 0.0f, 6.0f, 8.0f, GoalKind::SHORT, Alliance::NEUTRAL, 0.30f},
     {-40.0f, 0.0f, 6.0f, 8.0f, GoalKind::SHORT, Alliance::NEUTRAL, 0.30f},
-    // red Alliance goals, flanking the red station (west wall)
+
     {-58.0f, 30.0f, 5.0f, 9.0f, GoalKind::ALLIANCE, Alliance::RED, 0.45f},
     {-58.0f, -30.0f, 5.0f, 9.0f, GoalKind::ALLIANCE, Alliance::RED, 0.45f},
-    // blue Alliance goals, flanking the blue station (east wall)
+
     {58.0f, 30.0f, 5.0f, 9.0f, GoalKind::ALLIANCE, Alliance::BLUE, 0.45f},
     {58.0f, -30.0f, 5.0f, 9.0f, GoalKind::ALLIANCE, Alliance::BLUE, 0.45f},
 };
 
-// --- Toggles: centre of each field wall, one per quadrant
 const Toggle toggles[4] = {
     {0.0f, 68.0f, Quad::NORTH, true},
     {0.0f, -68.0f, Quad::SOUTH, true},
@@ -58,7 +44,6 @@ const Toggle toggles[4] = {
     {-68.0f, 0.0f, Quad::WEST, false},
 };
 
-// --- Loaders: two adjacent to each Alliance Station
 const Loader loaders[4] = {
     {-66.0f, 54.0f, Alliance::RED},
     {-66.0f, -54.0f, Alliance::RED},
@@ -68,12 +53,7 @@ const Loader loaders[4] = {
 
 Alliance toggle_owner[4] = {Alliance::NEUTRAL, Alliance::NEUTRAL, Alliance::NEUTRAL, Alliance::NEUTRAL};
 
-// ---------------------------------------------------------------------------
-// Quadrants
-// ---------------------------------------------------------------------------
-
 Quad quad_of(float x, float y) {
-  // the diagonals are the boundaries: you belong to the wall you face
   if (y >= std::fabs(x)) return Quad::NORTH;
   if (y <= -std::fabs(x)) return Quad::SOUTH;
   return (x > 0) ? Quad::EAST : Quad::WEST;
@@ -84,12 +64,7 @@ void cycle_toggle(Quad q) {
   a = (a == Alliance::NEUTRAL) ? Alliance::RED : (a == Alliance::RED ? Alliance::BLUE : Alliance::NEUTRAL);
 }
 
-// ---------------------------------------------------------------------------
-// Draw helpers
-// ---------------------------------------------------------------------------
-
 namespace draw {
-
 void line(lv_layer_t* l, float x1, float y1, float x2, float y2, uint32_t color, int width, lv_opa_t opa,
           int dash_w, int dash_gap) {
   lv_draw_line_dsc_t d;
@@ -154,8 +129,6 @@ void disc(lv_layer_t* l, float cx, float cy, float r, uint32_t color, lv_opa_t o
 }
 
 void half_disc(lv_layer_t* l, float cx, float cy, float r, int side, uint32_t color, lv_opa_t opa) {
-  // clip a full disc to one side by drawing it then covering nothing -- instead
-  // approximate with a rounded rect covering half the bounding box
   if (side < 0) rect(l, cx - r, cy - r, cx, cy + r, color, opa, static_cast<int>(r) + 1);
   else rect(l, cx, cy - r, cx + r, cy + r, color, opa, static_cast<int>(r) + 1);
 }
@@ -172,15 +145,9 @@ void rot_rect(lv_layer_t* l, float cx, float cy, float w, float h, float s, floa
   tri(l, flx, fly, frx, fry, brx, bry, color, opa);
   tri(l, flx, fly, brx, bry, blx, bly, color, opa);
 }
-
-} // namespace draw
-
-// ---------------------------------------------------------------------------
-// Static field art
-// ---------------------------------------------------------------------------
+}
 
 namespace {
-
 void draw_tiles(lv_layer_t* l) {
   constexpr float F = static_cast<float>(PX);
   constexpr float t = F / 6.0f;
@@ -194,7 +161,6 @@ void draw_tiles(lv_layer_t* l) {
   }
 }
 
-/// The diagonals are the quadrant boundaries, so they are drawn as real tape.
 void draw_quadrants(lv_layer_t* l) {
   constexpr float F = static_cast<float>(PX);
   draw::line(l, 0, 0, F, F, col::TAPE, 2, LV_OPA_70);
@@ -224,7 +190,6 @@ void draw_goals_static(lv_layer_t* l) {
     draw::rect(l, x1, y1, x2, y2, body, LV_OPA_COVER, 3);
     draw::rect_outline(l, x1, y1, x2, y2, col::GOAL_DK, 1, LV_OPA_COVER, 3);
 
-    // the tall goal gets a deeper throat so it reads as taller than the shorts
     if (g.gkind == GoalKind::TALL) {
       draw::rect(l, x1 + 3, y1 + 3, x2 - 3, y2 - 3, col::GOAL_DK, LV_OPA_COVER, 2);
       draw::rect_outline(l, x1 - 3, y1 - 3, x2 + 3, y2 + 3, col::TAPE, 1, LV_OPA_40, 4);
@@ -236,8 +201,7 @@ void draw_wall(lv_layer_t* l) {
   draw::rect_outline(l, 0, 0, PX - 1, PX - 1, col::WALL, 4, LV_OPA_COVER, 3);
   draw::rect_outline(l, 2, 2, PX - 3, PX - 3, col::WALL_HI, 1, LV_OPA_60, 2);
 }
-
-} // namespace
+}
 
 void draw_field_static(lv_layer_t* l) {
   draw_tiles(l);
@@ -248,9 +212,6 @@ void draw_field_static(lv_layer_t* l) {
 }
 
 namespace {
-
-/// Wash the owning alliance's colour over a quadrant triangle, so a flipped
-/// toggle is readable at a glance rather than just a 4 px roller changing hue.
 void draw_quadrant_wash(lv_layer_t* l) {
   constexpr float F = static_cast<float>(PX);
   constexpr float C = F * 0.5f;
@@ -268,12 +229,8 @@ void draw_quadrant_wash(lv_layer_t* l) {
     }
   }
 }
+}
 
-} // namespace
-
-// Toggles are rollers set into the wall. Colour follows the owner. They double
-// as the quadrant picker, so they are drawn well over scale -- see the note on
-// TOGGLE_LONG_IN in field.hpp.
 void draw_toggles(lv_layer_t* l, int highlight, float pulse) {
   draw_quadrant_wash(l);
 
@@ -289,7 +246,6 @@ void draw_toggles(lv_layer_t* l, int highlight, float pulse) {
     const float w = t.horizontal ? lng : thk;
     const float h = t.horizontal ? thk : lng;
 
-    // chosen-start halo, breathing so it reads as live rather than painted on
     if (qi == highlight) {
       const float grow = 3.0f + 4.0f * pulse;
       draw::rect(l, x - w - grow, y - h - grow, x + w + grow, y + h + grow, col::SELECT, LV_OPA_30, 6);
@@ -300,7 +256,6 @@ void draw_toggles(lv_layer_t* l, int highlight, float pulse) {
     draw::rect(l, x - w, y - h, x + w, y + h, 0x14181d, LV_OPA_COVER, 3);
     draw::rect(l, x - w + 1.5f, y - h + 1.5f, x + w - 1.5f, y + h - 1.5f, c, LV_OPA_COVER, 3);
 
-    // ribs, so it reads as a spinnable roller rather than a flat bar
     for (int r = -1; r <= 1; ++r) {
       const float f = static_cast<float>(r) * 0.45f;
       if (t.horizontal) draw::line(l, x + w * f, y - h + 2, x + w * f, y + h - 2, 0x14181d, 1, LV_OPA_50);
@@ -308,5 +263,4 @@ void draw_toggles(lv_layer_t* l, int highlight, float pulse) {
     }
   }
 }
-
-} // namespace field
+}

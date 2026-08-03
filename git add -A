@@ -1,0 +1,19 @@
+warning: in the working copy of 'include/auton_selector.hpp', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'include/autons.hpp', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'include/field.hpp', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'include/subsystems.hpp', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/auton_selector.cpp', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/autons.cpp', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/field.cpp', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/main.cpp', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/subsystems.cpp', LF will be replaced by CRLF the next time Git touches it
+ include/auton_selector.hpp |  88 [32m+[m[31m----[m
+ include/autons.hpp         |  56 [32m+[m[31m---[m
+ include/field.hpp          |  87 [32m+[m[31m----[m
+ include/subsystems.hpp     |  72 [32m+[m[31m----[m
+ src/auton_selector.cpp     | 779 [32m++++++++++[m[31m-----------------------------------[m
+ src/autons.cpp             | 123 [32m+++[m[31m----[m
+ src/field.cpp              |  66 [32m+[m[31m---[m
+ src/main.cpp               | 185 [32m+++++[m[31m------[m
+ src/subsystems.cpp         | 189 [32m+++[m[31m--------[m
+ 9 files changed, 394 insertions(+), 1251 deletions(-)

@@ -1,81 +1,70 @@
 #include "auton_selector.hpp" // IWYU pragma: keep
 #include "field.hpp"          // IWYU pragma: keep
 
-#include <cmath>
+    #include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
 
-// The field art, baked in from src/field_img.c (232x232 ARGB8888). This must
-// sit at global scope: inside the anonymous namespace below it would get
-// internal linkage and fail to bind to the C symbol.
 LV_IMAGE_DECLARE(field_img);
 
-// ---- TEAM LOGO -------------------------------------------------------------
-// The team badge, baked in from src/logo_img.c (113x148 ARGB8888).
-//
-// lv_image does NOT scale to fit -- it sizes itself to the source and overflows
-// its parent. Artwork must therefore arrive pre-fitted to LOGO_BOX (see
-// build_landing). Comment out both lines below to fall back to the drawn
-// placeholder badge.
 LV_IMAGE_DECLARE(logo_img);
 #define HAVE_LOGO_IMAGE 1
-// ----------------------------------------------------------------------------
+
+// The selected alliance. This IS the selector's storage, not a copy of it, so
+// it cannot drift out of step with the dropdown. Written by the alliance
+// dropdown and by load_saved(); declared in auton_selector.hpp.
+field::Alliance color = field::Alliance::RED;
 
 namespace auton {
 namespace {
-
 using field::PX_PER_IN;
 using field::px_x;
 using field::px_y;
 
-// ---------------------------------------------------------------------------
-// Layout. PROS gives LVGL 480x240 -- the V5 keeps the top strip for itself.
-// ---------------------------------------------------------------------------
-
 constexpr int SCREEN_W = 480;
 constexpr int SCREEN_H = 240;
 
-constexpr int CARD_X = 8;
+  constexpr int CARD_X = 8;
 constexpr int CARD_Y = 4;
 constexpr int CARD_W = 224;
-constexpr int CARD_H = 232;
+  constexpr int CARD_H = 232;
 constexpr int CARD_PAD = 10;
-constexpr int COL_W = CARD_W - 2 * CARD_PAD; // 204
-constexpr int COL_H = CARD_H - 2 * CARD_PAD; // 212
+    constexpr int COL_W = CARD_W - 2 * CARD_PAD;
+constexpr int COL_H = CARD_H - 2 * CARD_PAD;
 
 constexpr int FIELD_X = 240;
 constexpr int FIELD_Y = 4;
 
-constexpr int ROW_H = 30; // dropdowns
+constexpr int ROW_H = 30;
+
 constexpr int BTN_H = 28;
 
-constexpr float ROBOT_IN = 15.0f;
+ constexpr float ROBOT_IN = 15.0f;
 constexpr float PI_F = field::PI_F;
 
 namespace ink {
-constexpr uint32_t BG = 0x0b0e13;
-constexpr uint32_t BG_DEEP = 0x05070a; // intro / blackout backdrop
+  constexpr uint32_t BG = 0x0b0e13;
+constexpr uint32_t BG_DEEP = 0x05070a;
 constexpr uint32_t CARD = 0x151a21;
-constexpr uint32_t EDGE = 0x232a33;
+   constexpr uint32_t EDGE = 0x232a33;
 constexpr uint32_t CTRL = 0x1d232b;
-constexpr uint32_t CTRL_HI = 0x27303a;
-constexpr uint32_t SUNK = 0x0e1218;
+ constexpr uint32_t CTRL_HI = 0x27303a;
+  constexpr uint32_t SUNK = 0x0e1218;
 constexpr uint32_t TEXT = 0xe6edf3;
+
 constexpr uint32_t DIM = 0x7d8590;
-constexpr uint32_t ACCENT = 0x4cc9f0;
-constexpr uint32_t VIOLET = 0xa987f5;
+    constexpr uint32_t ACCENT = 0x4cc9f0;
+ constexpr uint32_t VIOLET = 0xa987f5;
 constexpr uint32_t TEAL = 0x2dd4bf;
 constexpr uint32_t GOOD = 0x3fb950;
 constexpr uint32_t WARN = 0xd29922;
 constexpr uint32_t RED = 0xda3633;
 constexpr uint32_t BLUE = 0x388bfd;
-} // namespace ink
+}
 
 uint32_t alliance_ink(field::Alliance a) { return a == field::Alliance::BLUE ? ink::BLUE : ink::RED; }
 
-/// Linear blend between two packed RGB colours. Used for pulses and fades --
-/// LVGL has no colour-mixing helper that works on plain uint32_t hex.
 uint32_t mix(uint32_t a, uint32_t b, float t) {
   if (t < 0.0f) t = 0.0f;
   if (t > 1.0f) t = 1.0f;
@@ -89,74 +78,38 @@ uint32_t mix(uint32_t a, uint32_t b, float t) {
   return (ch(ar, br) << 16) | (ch(ag, bg) << 8) | ch(ab, bb);
 }
 
-/// Wrap a heading difference into (-180, 180]. Every angular interpolation in
-/// this file goes through here: without it a turn from 170 to -170 -- twenty
-/// degrees -- animates the long way round, 340 degrees.
 float wrap180(float d) {
   while (d > 180.0f) d -= 360.0f;
   while (d <= -180.0f) d += 360.0f;
   return d;
 }
 
-/// Frame counter, for anything that breathes. Wraps harmlessly.
 uint32_t g_tick = 0;
 
-/// 0..1 triangle-ish pulse, `period` frames long.
 float pulse(float period) {
   const float u = static_cast<float>(g_tick % static_cast<uint32_t>(period)) / period;
   return 0.5f - 0.5f * std::cos(u * 2.0f * PI_F);
 }
 
-// ---------------------------------------------------------------------------
-// Debug log
-//
-// A ring of fixed-width slots. Writers can be any task -- autonomous, opcontrol
-// or the UI -- and there is no lock, because PROS's Mutex is not available to
-// the desktop simulator and a lock here would be the only thing forcing it.
-//
-// Fixed-width slots are what makes that safe rather than merely convenient: a
-// writer can never run past the end of its own slot, so the worst case if two
-// tasks log at the same instant is one garbled line, not corruption. `head`
-// is published only after the line is complete, so a reader never sees half a
-// line -- it can only miss one.
-// ---------------------------------------------------------------------------
-
-constexpr int LOG_LINES = 64; // ring depth
-constexpr int LOG_COLS = 56;  // including the timestamp and the terminator
-constexpr int LOG_VIS = 13;   // lines that fit on the console view
+constexpr int LOG_LINES = 64;
+constexpr int LOG_COLS = 56;
+constexpr int LOG_VIS = 13;
 
 char g_log[LOG_LINES][LOG_COLS] = {};
-volatile uint32_t g_log_head = 0;  // total lines ever written, not an index
-volatile uint32_t g_log_shown = 0; // head as of the last console repaint
-
-// ---------------------------------------------------------------------------
-// Route steps
-//
-// These belong to the on-brain route builder -- the Design view and the driving
-// recorder -- and to nothing else. Routines in AUTONS are compiled C++ and know
-// nothing about any of this.
-//
-// It is deliberately private to this file. An earlier version exposed it as a
-// vocabulary for writing routines in, which meant learning a second way to say
-// moveToPoint that could only express what the preview happened to support.
-// ---------------------------------------------------------------------------
+volatile uint32_t g_log_head = 0;
+volatile uint32_t g_log_shown = 0;
 
 enum class Kind : uint8_t {
-  DRIVE,  // a = inches along current heading, negative reverses
-  TURN,   // a = absolute heading, degrees
-  GOTO,   // a,b = field point in inches; flag bit 0 = swerve
-  INTAKE, // a = +1 in, -1 out, 0 stop
-  // There is no CLAW step. A hand-built route cannot move the claw -- write a
-  // routine in autons.cpp and call spinclaw() if you need that. Routes saved by
-  // an older build still containing a CLAW line report an unknown step and skip
-  // it.
-  LIFT,   // a = 0..1 target height
-  WAIT,   // a = milliseconds
-  SCORE,  // a = lift height 0..1; raise, eject off the back, return to travel
+  DRIVE,
+  TURN,
+  GOTO,
+  INTAKE,
+
+  LIFT,
+  WAIT,
+  SCORE,
 };
 
-/// GOTO modifier: without it the robot turns to the bearing first and then
-/// drives straight; with it the robot arcs to the point in one motion.
 constexpr uint8_t F_SWERVE = 1;
 
 struct Step {
@@ -165,7 +118,6 @@ struct Step {
   uint8_t flag;
 };
 
-/// Cap on the hand-built route.
 constexpr int MAX_STEPS = 20;
 
 struct RouteBuf {
@@ -173,33 +125,22 @@ struct RouteBuf {
   int n;
 };
 
-// ---------------------------------------------------------------------------
-// Starting positions
-//
-// Absolute field positions, not red-frame: tapping the north wall puts the
-// robot against the north wall whichever alliance is selected. Only the
-// hand-built route is mirrored, because it is drawn on the field in the red
-// frame; a compiled routine runs exactly as written.
-// ---------------------------------------------------------------------------
-
 struct Start {
   float x, y, th;
 };
 
 const Start STARTS[] = {
-    {0.0f, 0.0f, 0.0f},      // 0  use the route's own default
-    {-52.0f, 0.0f, 90.0f},   // 1  west quadrant, facing +X
-    {0.0f, 52.0f, 180.0f},   // 2  north quadrant, facing -Y
-    {52.0f, 0.0f, 270.0f},   // 3  east quadrant, facing -X
-    {0.0f, -52.0f, 0.0f},    // 4  south quadrant, facing +Y
-    {-52.0f, 44.0f, 90.0f},  // 5  loader +Y
-    {-52.0f, -44.0f, 90.0f}, // 6  loader -Y
-    {0.0f, 0.0f, 0.0f},      // 7  field centre
+    {0.0f, 0.0f, 0.0f},
+    {-52.0f, 0.0f, 90.0f},
+    {0.0f, 52.0f, 180.0f},
+    {52.0f, 0.0f, 270.0f},
+    {0.0f, -52.0f, 0.0f},
+    {-52.0f, 44.0f, 90.0f},
+    {-52.0f, -44.0f, 90.0f},
+    {0.0f, 0.0f, 0.0f},
 };
 constexpr int START_COUNT = 8;
 
-// Indices into STARTS. The four quadrant entries are what a tap on a Toggle
-// selects, so they are named rather than spelled as magic numbers.
 constexpr int ST_DEFAULT = 0;
 constexpr int ST_WEST = 1;
 constexpr int ST_NORTH = 2;
@@ -209,25 +150,8 @@ constexpr int ST_SOUTH = 4;
 const char* const START_OPTIONS = "Route default\nWest quadrant\nNorth quadrant\nEast quadrant\n"
                                   "South quadrant\nLoader +Y\nLoader -Y\nField centre";
 
-// ---------------------------------------------------------------------------
-// Routes
-//
-// The routes themselves are in src/autons.cpp. This file only indexes them.
-//
-// A selection is an int in [0, AUTON_COUNT]: below AUTON_COUNT it names an
-// entry in AUTONS, and AUTON_COUNT itself means the hand-built Custom route.
-// That keeps the dropdown, the saved file and this code using one number, and
-// it means AUTONS can be empty without a special case anywhere except the
-// dropdown text.
-// ---------------------------------------------------------------------------
-
-/// The selection value that means the hand-built route rather than an entry in
-/// AUTONS. It sits one past the end, so a plain int covers both cases.
 int custom_sel() { return AUTON_COUNT; }
 
-/// Dropdown text, built once at init from the names in AUTONS. lv_dropdown
-/// keeps the pointer when set with _static, so this has to outlive the widget --
-/// hence file scope rather than a local in build_select.
 char g_route_options[MAX_AUTONS * 24 + 24] = {};
 
 void build_route_options() {
@@ -237,49 +161,30 @@ void build_route_options() {
     if (left <= 1) break;
     p += std::snprintf(g_route_options + p, static_cast<size_t>(left), "%s\n", AUTONS[i].name);
     if (p >= static_cast<int>(sizeof(g_route_options))) {
-      p = static_cast<int>(sizeof(g_route_options)) - 1; // snprintf truncated
+      p = static_cast<int>(sizeof(g_route_options)) - 1;
       break;
     }
   }
   std::snprintf(g_route_options + p, sizeof(g_route_options) - static_cast<size_t>(p), "Custom route");
 }
 
-// The hand-built route. Saved to the SD card with everything else, so it does
-// survive a power cycle -- an earlier comment here said it did not, which was
-// true before persistence existed. With no SD card it is RAM only.
-// It is kept after a run so the same test can be repeated.
 RouteBuf g_custom{{}, 0};
 float g_custom_start[3] = {-52.0f, 0.0f, 90.0f};
 
-/// Index into AUTONS, or custom_sel() for the hand-built route. Starts on the
-/// first route if there is one; with an empty AUTONS that is Custom.
 int g_selected = 0;
-field::Alliance g_alliance = field::Alliance::RED;
 int g_start_sel = 0;
 
-/// Blackout hides the whole selection behind an idle-looking screen so a scout
-/// standing over the pit cannot read the route off the brain. Persisted on
-/// purpose: a brownout mid-event must not come back up revealing everything.
 bool g_blackout = false;
 
 bool is_custom() { return g_selected >= AUTON_COUNT; }
 
-/// Steps only exist for the hand-built route. A compiled routine is a function;
-/// there is nothing here to count, list, animate or estimate.
 int step_count() { return is_custom() ? g_custom.n : 0; }
 
-bool mirrored() { return g_alliance == field::Alliance::BLUE; }
+bool mirrored() { return color == field::Alliance::BLUE; }
 
-/// A step as it will actually be driven, after alliance mirroring. Mirroring
-/// applies to the hand-built route only -- it is drawn on the field in the red
-/// frame, so it has to flip. A compiled routine runs exactly as written.
 Step step_at(int i) {
   Step s = g_custom.s[i];
   if (mirrored()) {
-    // mirror across the Y axis: x negates, and a clockwise heading becomes
-    // the same magnitude counter-clockwise. The TURN case must be re-wrapped:
-    // negating 180 gives -180, which is the same bearing but compares as a
-    // full turn away from it.
     if (s.kind == Kind::TURN) s.a = wrap180(-s.a);
     else if (s.kind == Kind::GOTO) s.a = -s.a;
   }
@@ -288,9 +193,6 @@ Step step_at(int i) {
 
 void start_pose(float& x, float& y, float& th) {
   if (g_start_sel != 0) {
-    // Explicit override from the START dropdown. Absolute field coordinates --
-    // not mirrored, because the point of tapping a quadrant is to put the robot
-    // in the quadrant that was tapped.
     const Start& s = STARTS[g_start_sel];
     x = s.x;
     y = s.y;
@@ -299,31 +201,18 @@ void start_pose(float& x, float& y, float& th) {
   }
 
   if (is_custom()) {
-    // The hand-built route is authored in the red frame, so its start mirrors
-    // with the rest of it.
     x = mirrored() ? -g_custom_start[0] : g_custom_start[0];
     y = g_custom_start[1];
     th = mirrored() ? wrap180(-g_custom_start[2]) : g_custom_start[2];
     return;
   }
 
-  // A compiled routine's start pose is used exactly as the table gives it. If a
-  // routine wants to differ by side it can ask alliance() and setPose itself.
   const Auton& a = AUTONS[g_selected];
   x = a.start_x;
   y = a.start_y;
   th = a.start_heading;
 }
 
-// ---------------------------------------------------------------------------
-// Quadrants as the start picker
-//
-// Tapping a Toggle puts the robot against that wall. STARTS holds absolute
-// field positions, so this is a straight mapping in both directions -- it used
-// to swap east and west for blue, back when start poses were mirrored.
-// ---------------------------------------------------------------------------
-
-/// STARTS index that puts the robot in the on-screen quadrant `q`.
 int start_for_quad(field::Quad q) {
   switch (q) {
     case field::Quad::NORTH: return ST_NORTH;
@@ -334,8 +223,6 @@ int start_for_quad(field::Quad q) {
   return ST_DEFAULT;
 }
 
-/// On-screen quadrant the current start selection lands in, or -1 if the
-/// selection is not one of the four quadrant entries.
 int highlight_quad() {
   switch (g_start_sel) {
     case ST_NORTH: return static_cast<int>(field::Quad::NORTH);
@@ -345,19 +232,6 @@ int highlight_quad() {
     default: return -1;
   }
 }
-
-// ---------------------------------------------------------------------------
-// Persistence
-//
-// The brain reboots between matches and after every brownout. Without this the
-// selection is silently lost and whatever route happens to be first runs
-// instead, which is a match-losing failure mode that looks like nothing went
-// wrong. Everything the user chose is written to the SD card as plain text so
-// it can also be inspected or fixed on a laptop.
-//
-// No SD card is not an error -- fopen simply fails and the selector runs with
-// defaults, exactly as it did before this existed.
-// ---------------------------------------------------------------------------
 
 #ifdef LUCKYCATS_SIM
 constexpr const char* SAVE_PATH = "luckycats_sim_auton.txt";
@@ -406,7 +280,7 @@ void save_now() {
 
   std::fprintf(f, "# LuckyCats selector state, format 1. Safe to edit by hand;\n");
   std::fprintf(f, "# unrecognised lines are ignored. Delete the file to reset.\n");
-  std::fprintf(f, "alliance %d\n", g_alliance == field::Alliance::BLUE ? 1 : 0);
+  std::fprintf(f, "alliance %d\n", color == field::Alliance::BLUE ? 1 : 0);
   std::fprintf(f, "route %d\n", static_cast<int>(g_selected));
   std::fprintf(f, "start %d\n", g_start_sel);
   std::fprintf(f, "blackout %d\n", g_blackout ? 1 : 0);
@@ -431,10 +305,7 @@ void load_saved() {
   bool first = true;
   while (std::fgets(line, sizeof(line), f) != nullptr) {
     char* p = line;
-    // Notepad and PowerShell both write a UTF-8 BOM. Without this the first
-    // line silently fails to parse and only the first setting is lost, which is
-    // a genuinely baffling thing to debug. The file is documented as hand
-    // editable, so it has to survive being hand edited.
+
     if (first) {
       first = false;
       if (static_cast<unsigned char>(p[0]) == 0xEF && static_cast<unsigned char>(p[1]) == 0xBB &&
@@ -447,7 +318,7 @@ void load_saved() {
     char tag[16];
 
     if (std::sscanf(p, "alliance %d", &iv) == 1) {
-      g_alliance = iv ? field::Alliance::BLUE : field::Alliance::RED;
+      color = iv ? field::Alliance::BLUE : field::Alliance::RED;
     } else if (std::sscanf(p, "route %d", &iv) == 1) {
       if (iv >= 0 && iv <= AUTON_COUNT) g_selected = iv;
     } else if (std::sscanf(p, "start %d", &iv) == 1) {
@@ -462,12 +333,8 @@ void load_saved() {
       Kind k;
       if (kind_from_tag(tag, k)) {
         if (n < MAX_STEPS) g_custom.s[n++] = Step{k, a, b, static_cast<uint8_t>(fl)};
-        else ++dropped; // a hand-edited file can hold more steps than fit
+        else ++dropped;
       } else {
-        // Most likely a CLAW step written by an older build, from before the
-        // pivot became automatic. Say so rather than quietly shortening the
-        // route -- a step that disappears without a word is how a route drives
-        // differently at an event than it did in the pits.
         ++unknown;
       }
     }
@@ -477,13 +344,9 @@ void load_saved() {
   if (unknown > 0) logf("saved route: %d unknown steps skipped (CLAW is gone -- automatic now)", unknown);
   std::fclose(f);
 
-  // A saved CUSTOM selection with nothing in it would leave the user staring at
-  // an empty preview with no obvious cause.
   if (is_custom() && g_custom.n == 0) g_selected = 0;
 }
 
-/// Note a change without writing yet. Every tap would otherwise hit the SD card
-/// mid-frame, and a dropdown scrub is dozens of taps.
 void mark_dirty() {
   g_save_dirty = true;
   g_save_mark = pros::millis();
@@ -496,7 +359,6 @@ void save_tick() {
   save_now();
 }
 
-/// Bearing from (x,y) to (tx,ty). LemLib heading: 0 faces +Y, clockwise up.
 float bearing_to(float x, float y, float tx, float ty) {
   const float dx = tx - x, dy = ty - y;
   if (std::fabs(dx) < 0.01f && std::fabs(dy) < 0.01f) return 0.0f;
@@ -520,67 +382,48 @@ void step_text(const Step& s, char* out, int n) {
   }
 }
 
-/// step_text into a shared buffer, for log lines. Not reentrant, and only ever
-/// called from the one autonomous task.
 const char* step_desc(const Step& s) {
   static char buf[40];
   step_text(s, buf, sizeof(buf));
   return buf;
 }
 
-// ---------------------------------------------------------------------------
-// Preview simulation
-//
-// Runs forward frame by frame rather than being evaluated at an arbitrary t,
-// because toggle flips are stateful.
-// ---------------------------------------------------------------------------
-
-constexpr uint32_t FRAME_MS = 50; // 20 fps
+constexpr uint32_t FRAME_MS = 50;
 constexpr uint32_t END_HOLD_MS = 900;
 
-constexpr float REACH_IN = 4.0f;   // intake sits this far in front of the bumper
-constexpr float REACH_R_IN = 5.0f; // radius the intake acts over
+constexpr float REACH_IN = 4.0f;
+constexpr float REACH_R_IN = 5.0f;
 
-// SCORE is two legs. These are guesses at cascade travel time and want
-// measuring against the real lift -- they are what makes the route estimate
-// under the ROUTE dropdown optimistic or pessimistic.
 constexpr uint32_t SCORE_RAISE_MS = 600;
 constexpr uint32_t SCORE_EJECT_MS = 700;
 
-// How long the preview holds on a step that does not move the robot. Also what
-// the route estimate charges for them, which is why they are constants rather
-// than literals buried in begin_step.
 constexpr uint32_t INTAKE_MS = 420;
 constexpr uint32_t LIFT_MS = 650;
 
 struct Sim {
   int step_i;
-  int phase; // GOTO only: 0 = turning to bearing, 1 = driving
+  int phase;
   uint32_t t_in_step;
-  uint32_t dur; // length of the current leg, ms
+  uint32_t dur;
   uint32_t hold;
-  float x, y, th;    // live pose
-  float sx, sy, sth; // pose when the current leg began
-  float tx, ty;      // position the current leg is heading for
-  float dth;         // signed shortest turn for this leg, degrees
-  float lift;        // 0..1
+  float x, y, th;
+  float sx, sy, sth;
+  float tx, ty;
+  float dth;
+  float lift;
   float lift_from, lift_to;
-  int intake;    // -1 out, 0 stop, +1 in
-  bool claw;     // true = swung forward. Derived from `lift`, never set by a step.
-  bool to_start; // pre-roll: sliding to a newly chosen start pose
+  int intake;
+  bool claw;
+  bool to_start;
   bool finished;
 };
 
 Sim g_sim{};
 bool g_robot_selected = false;
 
-/// Leg durations. Both scale with how far the robot actually has to go -- a
-/// fixed duration made a 5 degree nudge and a 180 degree spin take the same
-/// time, which is the main reason turns read wrong in the preview.
 uint32_t drive_ms(float inches) { return static_cast<uint32_t>(std::fabs(inches) * 34.0f) + 240; }
 uint32_t turn_ms(float degrees) { return static_cast<uint32_t>(std::fabs(degrees) * 4.2f) + 180; }
 
-/// Where the intake mouth sits, in field inches.
 void claw_point(float x, float y, float th, float& cx, float& cy) {
   const float t = th * PI_F / 180.0f;
   const float reach = ROBOT_IN * 0.5f + REACH_IN;
@@ -588,21 +431,17 @@ void claw_point(float x, float y, float th, float& cx, float& cy) {
   cy = y + std::cos(t) * reach;
 }
 
-/// Spin the toggle the robot is parked against, if the intake is running.
 void try_toggle() {
   float cx, cy;
   claw_point(g_sim.x, g_sim.y, g_sim.th, cx, cy);
   for (const field::Toggle& t : field::toggles) {
     const float dx = t.x - cx, dy = t.y - cy;
     if (dx * dx + dy * dy > 36.0f) continue;
-    field::toggle_owner[static_cast<int>(t.quadrant)] = g_alliance;
+    field::toggle_owner[static_cast<int>(t.quadrant)] = color;
     return;
   }
 }
 
-/// Aim the current leg. `tth` is an absolute heading; the turn is stored as the
-/// shortest signed delta from where the robot is now, so interpolation never
-/// takes the long way round.
 void set_leg(float tx, float ty, float tth, uint32_t dur) {
   g_sim.t_in_step = 0;
   g_sim.sx = g_sim.x;
@@ -639,12 +478,9 @@ void begin_step() {
       const float d = wrap180(bear - g_sim.th);
       const float dist = std::sqrt((s.a - g_sim.x) * (s.a - g_sim.x) + (s.b - g_sim.y) * (s.b - g_sim.y));
       if (s.flag & F_SWERVE) {
-        // one continuous arc: position and heading resolve together, so the
-        // leg has to be long enough for whichever of the two dominates
         g_sim.phase = 1;
         set_leg(s.a, s.b, g_sim.th + d, drive_ms(dist) + turn_ms(d) / 2);
       } else {
-        // phase 0 turns in place; phase 1 drives the straight line
         set_leg(g_sim.x, g_sim.y, g_sim.th + d, turn_ms(d));
       }
       break;
@@ -655,41 +491,23 @@ void begin_step() {
       break;
     case Kind::LIFT:
       set_leg(g_sim.x, g_sim.y, g_sim.th, LIFT_MS);
-      g_sim.lift_to = s.a; // after set_leg -- it resets lift_to to the current height
+      g_sim.lift_to = s.a;
       break;
     case Kind::WAIT:
       set_leg(g_sim.x, g_sim.y, g_sim.th, static_cast<uint32_t>(s.a));
       break;
     case Kind::SCORE:
-      // phase 0 raises; sim_tick starts phase 1, which ejects and comes back
-      // down. Two phases rather than one so the preview shows the lift going up
-      // before anything leaves the robot, which is the order that matters when
-      // checking a Goal is tall enough.
+
       set_leg(g_sim.x, g_sim.y, g_sim.th, SCORE_RAISE_MS);
-      g_sim.lift_to = s.a; // after set_leg, which resets it
+      g_sim.lift_to = s.a;
       break;
   }
 }
 
-// ---------------------------------------------------------------------------
-// Route estimate
-//
-// Walks the route without animating it and adds up the same per-leg durations
-// the preview uses, so the SELECT card can say whether a route fits in the
-// period before anyone drives it. It inherits every limitation of the preview
-// -- constant rate, no PID settling, no slew -- so read it as "this route is
-// nowhere near 15 s" or "this is going to be tight", never as a real time.
-// ---------------------------------------------------------------------------
-
 uint32_t g_route_ms = 0;
 
-/// Match autonomous is 15 s; programming skills is a minute.
-/// Match autonomous. The hand-built route is the only thing estimated, and it
-/// is always a match route -- skills gets written in C++ like everything else.
 constexpr uint32_t BUDGET_MS = 15000;
 
-/// Wall-clock length of the last real run, or 0. A measurement beats an
-/// estimate, and it is the only number available for a compiled routine.
 uint32_t g_last_run_ms = 0;
 
 uint32_t route_ms() {
@@ -724,12 +542,7 @@ uint32_t route_ms() {
         th = wrap180(bear);
         break;
       }
-      // INTAKE and LIFT cost nothing here on purpose. run_selected issues
-      // them and moves straight on -- move() and move_absolute() do not block,
-      // and the waitUntilDone() that follows is waiting on the chassis, which
-      // is not moving. The preview holds on them (INTAKE_MS and friends) only
-      // so a person watching can see them happen; charging the estimate for
-      // that dwell would put every route seconds over its real cost.
+
       case Kind::INTAKE:
       case Kind::LIFT: break;
       case Kind::WAIT: total += static_cast<uint32_t>(s.a); break;
@@ -739,9 +552,6 @@ uint32_t route_ms() {
   return total;
 }
 
-/// Restart the preview. When `animate` is set the robot slides from wherever it
-/// currently sits to the new start pose before the route begins, which is what
-/// makes tapping a quadrant read as "the robot moved there" rather than a jump.
 void sim_begin(bool animate) {
   g_route_ms = route_ms();
 
@@ -776,20 +586,13 @@ void sim_reset() { sim_begin(false); }
 
 float ease(float u) { return u * u * (3.0f - 2.0f * u); }
 
-/// Advance the current leg to normalised progress `u` (0..1, already eased).
 void apply_leg(float u) {
   g_sim.x = g_sim.sx + (g_sim.tx - g_sim.sx) * u;
   g_sim.y = g_sim.sy + (g_sim.ty - g_sim.sy) * u;
   g_sim.th = g_sim.sth + g_sim.dth * u;
   g_sim.lift = g_sim.lift_from + (g_sim.lift_to - g_sim.lift_from) * u;
-
-  // g_sim.claw is left alone. The claw is on a driver button now, so a route
-  // has nothing to say about where it is and the preview would only be
-  // guessing. A routine that calls spinclaw() moves the real claw without the
-  // preview knowing -- that is the honest state of it, not an oversight.
 }
 
-/// True once the current leg's clock has run out. Advances that clock.
 bool leg_step(float& u_out) {
   g_sim.t_in_step += FRAME_MS;
   const float raw = static_cast<float>(g_sim.t_in_step) / static_cast<float>(g_sim.dur);
@@ -799,18 +602,12 @@ bool leg_step(float& u_out) {
 
 void sim_tick() {
   if (g_sim.finished) {
-    // Loop the preview, but only when there is something to loop. A compiled
-    // routine has no steps, so this used to finish instantly and restart about
-    // once a second forever -- invisible, except that sim_begin clears the
-    // Toggle ownership, so quadrants set by long-pressing were wiped a second
-    // later and it looked like the long-press had not registered.
     if (step_count() == 0) return;
     if (g_sim.hold > END_HOLD_MS) sim_reset();
     else g_sim.hold += FRAME_MS;
     return;
   }
 
-  // pre-roll: sliding to a start pose the user just picked
   if (g_sim.to_start) {
     float u;
     const bool done = leg_step(u);
@@ -842,7 +639,6 @@ void sim_tick() {
   apply_leg(1.0f);
   g_sim.th = wrap180(g_sim.th);
 
-  // a non-swerve GOTO has finished turning; now drive the straight leg
   if (s.kind == Kind::GOTO && g_sim.phase == 0) {
     g_sim.phase = 1;
     const float dist = std::sqrt((s.a - g_sim.x) * (s.a - g_sim.x) + (s.b - g_sim.y) * (s.b - g_sim.y));
@@ -850,7 +646,6 @@ void sim_tick() {
     return;
   }
 
-  // SCORE has finished raising; now eject off the back and come back down
   if (s.kind == Kind::SCORE && g_sim.phase == 0) {
     g_sim.phase = 1;
     g_sim.intake = -1;
@@ -869,13 +664,9 @@ void sim_tick() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Live telemetry and route recording
-// ---------------------------------------------------------------------------
-
 constexpr int TRAIL_MAX = 160;
-constexpr float TRAIL_MIN_IN = 1.2f;  // breadcrumb spacing
-constexpr float REC_MIN_IN = 8.0f;    // recorded waypoint spacing
+constexpr float TRAIL_MIN_IN = 1.2f;
+constexpr float REC_MIN_IN = 8.0f;
 
 struct Pt {
   float x, y;
@@ -895,7 +686,6 @@ volatile bool g_req_live = false;
 volatile bool g_req_rec_toggle = false;
 volatile bool g_req_trail_clear = false;
 
-/// Set by request_stop(), read by the step loop between steps.
 volatile bool g_cancel = false;
 
 void trail_push(float x, float y) {
@@ -904,17 +694,15 @@ void trail_push(float x, float y) {
     if (dx * dx + dy * dy < TRAIL_MIN_IN * TRAIL_MIN_IN) return;
   }
   if (g_trail_n >= TRAIL_MAX) {
-    // ring down: drop the oldest half so the recent path stays visible
     std::memmove(g_trail, g_trail + TRAIL_MAX / 2, sizeof(Pt) * (TRAIL_MAX / 2));
     g_trail_n = TRAIL_MAX / 2;
   }
   g_trail[g_trail_n++] = Pt{x, y};
 }
 
-/// Turn the recorded breadcrumbs into a custom route of GOTO steps.
 void recording_commit() {
   g_custom.n = 0;
-  // store in the RED frame so the blue mirror reproduces what was driven
+
   const float sgn = mirrored() ? -1.0f : 1.0f;
   g_custom_start[0] = g_rec_start[0] * sgn;
   g_custom_start[1] = g_rec_start[1];
@@ -947,17 +735,11 @@ void live_sample() {
   if (g_rec_n < MAX_STEPS) g_rec[g_rec_n++] = Pt{g_live_x, g_live_y};
 }
 
-// ---------------------------------------------------------------------------
-// Robot rendering
-// ---------------------------------------------------------------------------
-
-/// ghost = translucent outline only. mech = draw lift bar / claw / intake ring,
-/// which only the simulated robot has state for.
 void draw_chassis(lv_layer_t* l, float x, float y, float th, bool ghost, bool mech) {
   const float t = th * PI_F / 180.0f;
   const float s = std::sin(t), c = std::cos(t);
-  const float fx = s, fy = -c; // forward, screen space
-  const float rx = c, ry = s;  // right, screen space
+  const float fx = s, fy = -c;
+  const float rx = c, ry = s;
 
   const float cx = px_x(x);
   const float cy = px_y(y);
@@ -972,10 +754,8 @@ void draw_chassis(lv_layer_t* l, float x, float y, float th, bool ghost, bool me
     return;
   }
 
-  // shadow
   field::draw::rot_rect(l, cx + 2.0f, cy + 2.0f, body, body, s, c, 0x000000, LV_OPA_30);
 
-  // wheels, before the body so they read as underneath
   for (int i = 0; i < 4; ++i) {
     const float ox = (i & 1) ? half * 0.92f : -half * 0.92f;
     const float oy = (i & 2) ? half * 0.55f : -half * 0.55f;
@@ -983,13 +763,11 @@ void draw_chassis(lv_layer_t* l, float x, float y, float th, bool ghost, bool me
                           0x15181c, LV_OPA_COVER);
   }
 
-  // chassis, in the selected alliance's colour so the mirror is obvious
   field::draw::rot_rect(l, cx, cy, body, body, s, c, 0x2f3742, LV_OPA_COVER);
   field::draw::rot_rect(l, cx + fx * half * 0.10f, cy + fy * half * 0.10f, body * 0.74f, body * 0.62f, s, c,
-                        alliance_ink(g_alliance), LV_OPA_70);
+                        alliance_ink(color), LV_OPA_70);
 
   if (mech) {
-    // lift indicator: fills from the back of the deck forward as the lift rises
     const float bw = body * 0.52f;
     const float bh = body * 0.13f;
     const float bx = cx - fx * half * 0.42f;
@@ -1001,7 +779,6 @@ void draw_chassis(lv_layer_t* l, float x, float y, float th, bool ghost, bool me
                             ink::ACCENT, LV_OPA_COVER);
     }
 
-    // claw prongs at the front, spread when open
     const float spread = g_sim.claw ? 0.20f : 0.42f;
     const float len = body * 0.30f;
     const float pxp = cx + fx * half, pyp = cy + fy * half;
@@ -1012,7 +789,6 @@ void draw_chassis(lv_layer_t* l, float x, float y, float th, bool ghost, bool me
                             0xb9c2cc, LV_OPA_COVER);
     }
 
-    // intake state ring: green pulling in, orange pushing out
     if (g_sim.intake != 0) {
       const uint32_t ic = (g_sim.intake > 0) ? ink::GOOD : ink::WARN;
       float gx, gy;
@@ -1022,13 +798,11 @@ void draw_chassis(lv_layer_t* l, float x, float y, float th, bool ghost, bool me
     }
   }
 
-  // heading nose
   const float nx = cx + fx * half * 1.35f, ny = cy + fy * half * 1.35f;
   field::draw::tri(l, cx + fx * half - rx * half * 0.30f, cy + fy * half - ry * half * 0.30f,
                    cx + fx * half + rx * half * 0.30f, cy + fy * half + ry * half * 0.30f, nx, ny, 0xffffff,
                    LV_OPA_90);
 
-  // selection ring when the driver has tapped the robot
   if (g_robot_selected) {
     const float r = half * 1.6f;
     field::draw::rect_outline(l, cx - r, cy - r, cx + r, cy + r, ink::ACCENT, 2, LV_OPA_90,
@@ -1036,25 +810,15 @@ void draw_chassis(lv_layer_t* l, float x, float y, float th, bool ghost, bool me
   }
 }
 
-// ---------------------------------------------------------------------------
-// Canvas
-// ---------------------------------------------------------------------------
-
 lv_obj_t* g_canvas = nullptr;
 
 alignas(64) uint8_t g_canvas_buf[LV_CANVAS_BUF_SIZE(field::PX, field::PX, 32, LV_DRAW_BUF_STRIDE_ALIGN)];
 alignas(64) uint8_t g_bg_buf[LV_CANVAS_BUF_SIZE(field::PX, field::PX, 32, LV_DRAW_BUF_STRIDE_ALIGN)];
 bool g_bg_ready = false;
 
-// The field art is decoded exactly once, here, into the cached background.
-// That matters: LV_CACHE_DEF_SIZE is 0 in this build, so an lv_image widget
-// would re-run the decoder on every invalidate -- 20 times a second.
 const void* const FIELD_IMAGE_SRC = &field_img;
 
 bool draw_field_image(lv_layer_t* l) {
-  // No null check on FIELD_IMAGE_SRC: it is the address of a linked-in object,
-  // so it can never be null and the compiler says so. The decoder call below is
-  // the real guard -- it fails if the art is missing or malformed.
   lv_image_header_t hdr;
   if (lv_image_decoder_get_info(FIELD_IMAGE_SRC, &hdr) != LV_RESULT_OK) return false;
   if (hdr.w != field::PX || hdr.h != field::PX) return false;
@@ -1070,8 +834,6 @@ bool draw_field_image(lv_layer_t* l) {
 }
 
 void build_background() {
-  // Opaque base first: the art is ARGB8888, so any transparent pixel in it
-  // would otherwise composite against whatever the buffer happened to hold.
   lv_canvas_fill_bg(g_canvas, lv_color_hex(ink::BG), LV_OPA_COVER);
 
   lv_layer_t layer;
@@ -1083,7 +845,6 @@ void build_background() {
 }
 
 void draw_planned_path(lv_layer_t* l, lv_opa_t opa) {
-  // walk the steps geometrically to trace where the route goes
   float x, y, th;
   start_pose(x, y, th);
 
@@ -1118,15 +879,10 @@ void draw_trail(lv_layer_t* l) {
     field::draw::line(l, px_x(g_trail[i - 1].x), px_y(g_trail[i - 1].y), px_x(g_trail[i].x),
                       px_y(g_trail[i].y), c, 2, LV_OPA_80);
 
-  // recorded waypoints sit on top as solid dots
   if (g_recording)
     for (int i = 0; i < g_rec_n; ++i)
       field::draw::disc(l, px_x(g_rec[i].x), px_y(g_rec[i].y), 3.0f, ink::WARN, LV_OPA_COVER);
 }
-
-// ---------------------------------------------------------------------------
-// Views
-// ---------------------------------------------------------------------------
 
 enum class View : uint8_t { LANDING = 0, SELECT = 1, EDIT = 2, LIVE = 3, CONSOLE = 4 };
 constexpr int VIEW_COUNT = 5;
@@ -1134,7 +890,6 @@ constexpr int VIEW_COUNT = 5;
 View g_view = View::LANDING;
 lv_obj_t* g_root[VIEW_COUNT] = {};
 
-// SELECT widgets
 lv_obj_t* g_dd_alliance = nullptr;
 lv_obj_t* g_dd_route = nullptr;
 lv_obj_t* g_dd_start = nullptr;
@@ -1142,23 +897,19 @@ lv_obj_t* g_lbl_pose = nullptr;
 lv_obj_t* g_lbl_step = nullptr;
 lv_obj_t* g_lbl_est = nullptr;
 
-// EDIT widgets
 lv_obj_t* g_dd_add = nullptr;
 lv_obj_t* g_step_row[MAX_STEPS] = {nullptr};
 lv_obj_t* g_step_lbl[MAX_STEPS] = {nullptr};
 lv_obj_t* g_lbl_empty = nullptr;
 
-// Pose HUD, floating over the field on every view that shows the field
 lv_obj_t* g_hud = nullptr;
 lv_obj_t* g_hud_stripe = nullptr;
 lv_obj_t* g_hud_x = nullptr;
 lv_obj_t* g_hud_y = nullptr;
 lv_obj_t* g_hud_h = nullptr;
 
-/// Set while autonomous() is actually driving the robot, so the HUD can say so.
 volatile bool g_auton_active = false;
 
-// LIVE widgets
 lv_obj_t* g_lbl_lx = nullptr;
 lv_obj_t* g_lbl_ly = nullptr;
 lv_obj_t* g_lbl_lh = nullptr;
@@ -1166,18 +917,11 @@ lv_obj_t* g_lbl_batt = nullptr;
 lv_obj_t* g_lbl_rec = nullptr;
 lv_obj_t* g_btn_rec_lbl = nullptr;
 
-// CONSOLE widgets
 lv_obj_t* g_lbl_log = nullptr;
 lv_obj_t* g_lbl_log_count = nullptr;
 
-// LANDING widgets
 lv_obj_t* g_lbl_health = nullptr;
 
-// RUN button. One per card view that has it, updated together.
-//
-// Two taps rather than one: a single tap on a touchscreen that makes a robot
-// drive is a bad idea in a pit. The first tap arms and the label says GO?, the
-// second within ARM_MS starts it. While running the same button stops it.
 constexpr int RUN_BTN_MAX = 2;
 constexpr uint32_t ARM_MS = 3000;
 lv_obj_t* g_run_btn[RUN_BTN_MAX] = {};
@@ -1186,9 +930,6 @@ int g_run_btn_n = 0;
 bool g_run_armed = false;
 uint32_t g_run_armed_at = 0;
 
-// Overlays. Neither is a View: both sit on top of whatever the selector is
-// already showing, and blackout in particular has to survive a view switch
-// requested by autonomous() starting.
 lv_obj_t* g_intro = nullptr;
 lv_obj_t* g_intro_bar_a = nullptr;
 lv_obj_t* g_intro_bar_b = nullptr;
@@ -1217,25 +958,21 @@ const char* route_name(int r) {
   return AUTONS[r].name;
 }
 
-/// The console and the landing page are the two views that own the full width,
-/// so the field preview has to get out of the way for both.
 bool canvas_visible() {
   return g_view != View::LANDING && g_view != View::CONSOLE && !g_intro_active && !g_blackout;
 }
 
 void set_view(View v) {
   g_view = v;
-  // An overlay owns the screen outright: the view still changes underneath so
-  // that dismissing the overlay lands somewhere sensible, but nothing shows.
+
   const bool covered = g_intro_active || g_blackout;
   for (int i = 0; i < VIEW_COUNT; ++i) {
     if (g_root[i] == nullptr) continue;
     if (!covered && i == static_cast<int>(v)) {
       lv_obj_remove_flag(g_root[i], LV_OBJ_FLAG_HIDDEN);
-      // Brief fade so switching views reads as a transition, not a cut.
-      // lv_obj_fade_in drives LV_STYLE_OPA, which children inherit -- do not
-      // pre-set opa_layered here, that is a different property and the fade
-      // would never touch it, leaving the view permanently invisible.
+
+      // Must unhide BEFORE this. fade_in drives LV_STYLE_OPA, which children
+      // inherit; starting it on a hidden object leaves the view invisible.
       lv_obj_fade_in(g_root[i], 160, 0);
     } else {
       lv_obj_add_flag(g_root[i], LV_OBJ_FLAG_HIDDEN);
@@ -1284,9 +1021,6 @@ void update_readout() {
   if (g_lbl_step != nullptr) {
     const int n = step_count();
     if (!is_custom()) {
-      // There is nothing to animate: a compiled routine is a function, and the
-      // only way to see its path is to run it. Say so rather than showing an
-      // idle field that looks like the preview is broken.
       std::snprintf(buf, sizeof(buf), "compiled routine - run to trace");
     } else if (g_sim.finished || n == 0) {
       std::snprintf(buf, sizeof(buf), "%s  -  %d step%s", route_name(g_selected), n, n == 1 ? "" : "s");
@@ -1302,10 +1036,10 @@ void update_readout() {
     uint32_t shown;
     bool measured;
     if (is_custom()) {
-      shown = g_route_ms; // estimated from the steps
+      shown = g_route_ms;
       measured = false;
     } else {
-      shown = g_last_run_ms; // the only honest number for a compiled routine
+      shown = g_last_run_ms;
       measured = true;
     }
 
@@ -1313,8 +1047,6 @@ void update_readout() {
       lv_label_set_text(g_lbl_est, measured ? "not run yet" : "");
       lv_obj_set_style_text_color(g_lbl_est, lv_color_hex(ink::DIM), LV_PART_MAIN);
     } else {
-      // Amber past the period. For an estimate that is optimistic amber: it has
-      // no PID settling in it. For a measurement it is simply the truth.
       const bool over = shown > BUDGET_MS;
       std::snprintf(buf, sizeof(buf), "%s%s%.1f s", over ? "OVER  " : "", measured ? "" : "~",
                     static_cast<double>(shown) / 1000.0);
@@ -1325,8 +1057,6 @@ void update_readout() {
 }
 
 void update_run_btn() {
-  // Disarm on a timeout so a stray tap in the pit cannot leave the robot one
-  // touch from driving for the rest of the day.
   if (g_run_armed && pros::millis() - g_run_armed_at > ARM_MS) g_run_armed = false;
 
   const bool go = g_auton_active;
@@ -1342,8 +1072,6 @@ void update_run_btn() {
   }
 }
 
-/// Rebuild the console text, but only when there is something new to show --
-/// this runs at 20 fps and lv_label_set_text reflows the whole block.
 void update_console() {
   if (g_lbl_log == nullptr) return;
   const uint32_t head = g_log_head;
@@ -1372,15 +1100,6 @@ void update_console() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Pose HUD
-//
-// X / Y / heading overlaid on the field itself. The card readouts are only
-// visible on the view that owns them, and during a real run the screen is on
-// LIVE -- but the field is what you are actually looking at while the robot
-// moves, so the numbers belong there too.
-// ---------------------------------------------------------------------------
-
 void update_hud() {
   if (g_hud == nullptr) return;
 
@@ -1397,8 +1116,6 @@ void update_hud() {
   std::snprintf(buf, sizeof(buf), "%.0f", static_cast<double>(wrap180(th)));
   lv_label_set_text(g_hud_h, buf);
 
-  // The stripe says where the numbers come from: amber while autonomous is
-  // actually driving, teal for real odometry, accent for a preview.
   uint32_t c = ink::ACCENT;
   if (g_auton_active) c = mix(ink::WARN, ink::TEXT, pulse(20.0f) * 0.5f);
   else if (live) c = ink::TEAL;
@@ -1448,14 +1165,14 @@ void redraw() {
   field::draw_toggles(&layer, highlight_quad(), pulse(34.0f));
 
   if (g_view == View::LIVE) {
-    draw_planned_path(&layer, LV_OPA_30); // dim, for comparison
+    draw_planned_path(&layer, LV_OPA_30);
     draw_trail(&layer);
     draw_chassis(&layer, g_live_x, g_live_y, g_live_th, false, false);
   } else {
     draw_planned_path(&layer, LV_OPA_70);
     float sx, sy, sth;
     start_pose(sx, sy, sth);
-    draw_chassis(&layer, sx, sy, sth, true, false); // ghost at the start pose
+    draw_chassis(&layer, sx, sy, sth, true, false);
     draw_chassis(&layer, g_sim.x, g_sim.y, g_sim.th, false, true);
   }
 
@@ -1467,7 +1184,6 @@ void redraw() {
   else update_readout();
 }
 
-/// `animate` slides the robot to the new start pose instead of teleporting it.
 void restart_preview(bool animate = false) {
   refresh_steps();
   sim_begin(animate);
@@ -1477,18 +1193,12 @@ void restart_preview(bool animate = false) {
 
 void push_step(Kind k, float a, float b = 0, uint8_t flag = 0) {
   if (g_custom.n >= MAX_STEPS) {
-    // Used to return silently, so tapping the field past the cap looked like
-    // the touchscreen had stopped responding.
     logf("route full: %d steps is the limit", MAX_STEPS);
     return;
   }
   g_custom.s[g_custom.n++] = Step{k, a, b, flag};
   restart_preview();
 }
-
-// ---------------------------------------------------------------------------
-// Events
-// ---------------------------------------------------------------------------
 
 void nav_cb(lv_event_t* e) {
   const int tag = static_cast<int>(reinterpret_cast<intptr_t>(lv_event_get_user_data(e)));
@@ -1498,7 +1208,7 @@ void nav_cb(lv_event_t* e) {
 }
 
 void alliance_cb(lv_event_t* e) {
-  g_alliance = (lv_dropdown_get_selected(lv_event_get_target_obj(e)) == 0) ? field::Alliance::RED
+  color = (lv_dropdown_get_selected(lv_event_get_target_obj(e)) == 0) ? field::Alliance::RED
                                                                           : field::Alliance::BLUE;
   g_robot_selected = false;
   restart_preview();
@@ -1522,10 +1232,9 @@ void route_cb(lv_event_t* e) {
 void start_cb(lv_event_t* e) {
   const uint32_t i = lv_dropdown_get_selected(lv_event_get_target_obj(e));
   g_start_sel = static_cast<int>(i < START_COUNT ? i : 0);
-  restart_preview(true); // slide there, so the change is visible on the field
+  restart_preview(true);
 }
 
-/// Tapping a quadrant picks it as the start. Called from the canvas handler.
 void select_quad(field::Quad q) {
   const int idx = start_for_quad(q);
   if (g_start_sel == idx) return;
@@ -1535,7 +1244,6 @@ void select_quad(field::Quad q) {
   restart_preview(true);
 }
 
-// The add dropdown stays showing "+ Add step"; picking an entry appends it.
 void add_cb(lv_event_t* e) {
   lv_obj_t* dd = lv_event_get_target_obj(e);
   switch (lv_dropdown_get_selected(dd)) {
@@ -1543,7 +1251,7 @@ void add_cb(lv_event_t* e) {
     case 1: push_step(Kind::TURN, 90.0f); break;
     case 2: push_step(Kind::INTAKE, 1.0f); break;
     case 3: push_step(Kind::INTAKE, -1.0f); break;
-    // No claw entries: the pivot follows the lift and is not commandable.
+
     case 4: push_step(Kind::LIFT, 0.8f); break;
     case 5: push_step(Kind::LIFT, 0.0f); break;
     case 6: push_step(Kind::WAIT, 500.0f); break;
@@ -1553,7 +1261,6 @@ void add_cb(lv_event_t* e) {
   lv_dropdown_set_selected(dd, 0);
 }
 
-/// tag 0 = undo, 1 = clear
 void edit_btn_cb(lv_event_t* e) {
   const int tag = static_cast<int>(reinterpret_cast<intptr_t>(lv_event_get_user_data(e)));
   if (tag == 0 && g_custom.n > 0) --g_custom.n;
@@ -1561,8 +1268,6 @@ void edit_btn_cb(lv_event_t* e) {
   restart_preview();
 }
 
-// Tapping a step row cycles its value -- keeps the builder usable without
-// steppers, which there is no screen space for.
 void step_cb(lv_event_t* e) {
   const int i = static_cast<int>(reinterpret_cast<intptr_t>(lv_event_get_user_data(e)));
   if (i >= g_custom.n) return;
@@ -1585,7 +1290,7 @@ void step_cb(lv_event_t* e) {
       s.a = v[k % 7];
       break;
     }
-    case Kind::GOTO: s.flag ^= F_SWERVE; break; // toggle turn-then-drive vs arc
+    case Kind::GOTO: s.flag ^= F_SWERVE; break;
     case Kind::INTAKE: s.a = (s.a > 0) ? -1.0f : ((s.a < 0) ? 0.0f : 1.0f); break;
     case Kind::LIFT: s.a = (s.a >= 0.79f) ? 0.0f : s.a + 0.4f; break;
     case Kind::WAIT: s.a = (s.a >= 1900.0f) ? 250.0f : s.a * 2.0f; break;
@@ -1619,7 +1324,6 @@ void trail_btn_cb(lv_event_t*) {
   redraw();
 }
 
-/// Field coordinates of a touch, or false if there is no active input device.
 bool canvas_point(float& ix, float& iy) {
   lv_indev_t* indev = lv_indev_active();
   if (indev == nullptr) return false;
@@ -1634,7 +1338,6 @@ bool canvas_point(float& ix, float& iy) {
   return true;
 }
 
-/// Which Toggle a touch is closest to, or nullptr.
 const field::Toggle* toggle_at(float ix, float iy) {
   constexpr float R2 = field::TOGGLE_HIT_IN * field::TOGGLE_HIT_IN;
   const field::Toggle* best = nullptr;
@@ -1650,10 +1353,6 @@ const field::Toggle* toggle_at(float ix, float iy) {
   return best;
 }
 
-// Holding a Toggle cycles who owns that quadrant. That used to be the plain tap,
-// but the tap is now the start picker -- ownership is a preview detail and the
-// start pose is what actually gets driven, so the start pose won the short
-// gesture.
 void canvas_long_cb(lv_event_t*) {
   float ix, iy;
   if (!canvas_point(ix, iy)) return;
@@ -1667,13 +1366,11 @@ void canvas_cb(lv_event_t*) {
   float ix, iy;
   if (!canvas_point(ix, iy)) return;
 
-  // tap a toggle -> start the route from that quadrant
   if (const field::Toggle* t = toggle_at(ix, iy)) {
     select_quad(t->quadrant);
     return;
   }
 
-  // tap the robot -> select it and show its coordinates
   const float rx = (g_view == View::LIVE) ? g_live_x : g_sim.x;
   const float ry = (g_view == View::LIVE) ? g_live_y : g_sim.y;
   const float dx = ix - rx, dy = iy - ry;
@@ -1685,8 +1382,6 @@ void canvas_cb(lv_event_t*) {
 
   g_robot_selected = false;
 
-  // tap elsewhere in the editor -> drop a waypoint. Points are stored in the
-  // RED frame so the blue mirror stays correct.
   if (g_view == View::EDIT) {
     g_selected = custom_sel();
     lv_dropdown_set_selected(g_dd_route, static_cast<uint32_t>(custom_sel()));
@@ -1699,15 +1394,13 @@ void canvas_cb(lv_event_t*) {
 void anim_cb(lv_timer_t*) {
   ++g_tick;
 
-  // service cross-task requests on the UI task, where widget calls are safe
   if (g_req_live) {
     g_req_live = false;
-    // Blackout outranks this. Autonomous starting must not be what reveals the
-    // route to the team standing behind the field.
+
     if (g_blackout) {
       g_view = View::LIVE;
     } else {
-      intro_finish(); // a match has started; the title sequence is over
+      intro_finish();
       if (g_view != View::LIVE) set_view(View::LIVE);
     }
   }
@@ -1736,7 +1429,7 @@ void anim_cb(lv_timer_t*) {
     }
   }
 
-  live_sample(); // cheap, and keeps the trail warm whichever view is up
+  live_sample();
   save_tick();
 
   if (g_intro_active) {
@@ -1745,8 +1438,6 @@ void anim_cb(lv_timer_t*) {
   }
 
   if (g_blackout) {
-    // Slow breath on the standby line, so the screen looks alive rather than
-    // frozen -- a frozen brain is the thing someone walks over to investigate.
     if (g_black_hint != nullptr)
       lv_obj_set_style_text_color(g_black_hint,
                                   lv_color_hex(mix(0x3a424c, ink::DIM, pulse(78.0f))), LV_PART_MAIN);
@@ -1757,16 +1448,12 @@ void anim_cb(lv_timer_t*) {
 
   if (g_view == View::CONSOLE) {
     update_console();
-    return; // no field, no preview -- nothing else on this view moves
+    return;
   }
 
   if (g_view == View::SELECT || g_view == View::EDIT) sim_tick();
   redraw();
 }
-
-// ---------------------------------------------------------------------------
-// Widget helpers
-// ---------------------------------------------------------------------------
 
 lv_obj_t* make_label(lv_obj_t* parent, int x, int y, const char* text, uint32_t color,
                      const lv_font_t* font) {
@@ -1778,7 +1465,6 @@ lv_obj_t* make_label(lv_obj_t* parent, int x, int y, const char* text, uint32_t 
   return t;
 }
 
-/// Small tracked-out caption above a control.
 lv_obj_t* make_caption(lv_obj_t* parent, int x, int y, const char* text) {
   lv_obj_t* t = make_label(parent, x, y, text, ink::DIM, &lv_font_montserrat_10);
   lv_obj_set_style_text_letter_space(t, 2, LV_PART_MAIN);
@@ -1820,11 +1506,7 @@ lv_obj_t* make_dropdown(lv_obj_t* parent, int x, int y, int w, const char* optio
   lv_obj_set_style_shadow_width(d, 0, LV_PART_MAIN);
 
   lv_obj_t* list = lv_dropdown_get_list(d);
-  // The list is clamped to the screen, not to the card, so its height is fixed
-  // by where the dropdown sits -- about 96 px for the ROUTE row. Nine routes in
-  // 96 px is three visible rows at the default 14 pt, which is a lot of
-  // dragging on a resistive screen. Dropping the list to 12 pt with tighter
-  // rows fits five without making the options hard to read.
+
   lv_obj_set_style_max_height(list, 200, LV_PART_MAIN);
   lv_obj_set_style_pad_ver(list, 2, LV_PART_MAIN);
   lv_obj_set_style_bg_color(list, lv_color_hex(ink::CARD), LV_PART_MAIN);
@@ -1841,7 +1523,6 @@ lv_obj_t* make_dropdown(lv_obj_t* parent, int x, int y, int w, const char* optio
   return d;
 }
 
-/// Full-screen transparent container, one per view.
 lv_obj_t* make_root(lv_obj_t* scr) {
   lv_obj_t* v = lv_obj_create(scr);
   lv_obj_set_pos(v, 0, 0);
@@ -1850,15 +1531,11 @@ lv_obj_t* make_root(lv_obj_t* scr) {
   lv_obj_set_style_border_width(v, 0, LV_PART_MAIN);
   lv_obj_set_style_pad_all(v, 0, LV_PART_MAIN);
   lv_obj_remove_flag(v, LV_OBJ_FLAG_SCROLLABLE);
-  // A view root covers the whole screen and is built after the canvas, so it
-  // sits on top of it. lv_obj_create is clickable by default, which means the
-  // root silently ate every tap on the field -- waypoint drops and the quadrant
-  // picker both looked dead. Children stay clickable; only the sheet does not.
+
   lv_obj_remove_flag(v, LV_OBJ_FLAG_CLICKABLE);
   return v;
 }
 
-/// The left-hand card that the SELECT / EDIT / LIVE views live inside.
 lv_obj_t* make_card(lv_obj_t* root) {
   lv_obj_t* c = lv_obj_create(root);
   lv_obj_set_pos(c, CARD_X, CARD_Y);
@@ -1872,11 +1549,6 @@ lv_obj_t* make_card(lv_obj_t* root) {
   return c;
 }
 
-/// Back chevron plus a section title, occupying the top 24 px of a card.
-///
-/// `with_run` adds the RUN button on the right of the same row. The header is
-/// the only strip of a card that is reliably free, and putting it there means
-/// it lands in the same place on every view that has one.
 void make_header(lv_obj_t* card, const char* title, bool with_run = false) {
   make_button(card, 0, 0, 60, 24, LV_SYMBOL_LEFT "  Menu", nav_cb, static_cast<int>(View::LANDING), ink::CTRL,
               &lv_font_montserrat_12);
@@ -1900,29 +1572,21 @@ void make_rule(lv_obj_t* card, int y) {
   lv_obj_set_style_radius(r, 0, LV_PART_MAIN);
 }
 
-// ---------------------------------------------------------------------------
-// View construction
-// ---------------------------------------------------------------------------
-
 void build_landing(lv_obj_t* scr) {
   lv_obj_t* root = make_root(scr);
   g_root[static_cast<int>(View::LANDING)] = root;
 
-  // ---- logo ----
-  // LOGO_BOX is the square the artwork has to fit inside. Anything wider runs
-  // into the button column at RX.
   constexpr int LOGO_BOX = 148;
   constexpr int LX = 26, LY = 46;
 #ifdef HAVE_LOGO_IMAGE
   lv_obj_t* img = lv_image_create(root);
   lv_image_set_src(img, &logo_img);
-  // The badge is taller than it is wide, so centre it in the box rather than
-  // pinning it to the left edge.
+
   const int iw = static_cast<int>(logo_img.header.w);
   const int ih = static_cast<int>(logo_img.header.h);
   lv_obj_set_pos(img, LX + (LOGO_BOX - iw) / 2, LY + (LOGO_BOX - ih) / 2);
 #else
-  // placeholder badge until a real logo is dropped in
+
   lv_obj_t* badge = lv_obj_create(root);
   lv_obj_set_pos(badge, LX, LY);
   lv_obj_set_size(badge, LOGO_BOX, LOGO_BOX);
@@ -1938,15 +1602,11 @@ void build_landing(lv_obj_t* scr) {
   lv_obj_center(bt);
 #endif
 
-  // ---- title block ----
   constexpr int RX = 196;
   lv_obj_t* h1 = make_label(root, RX, 34, "LUCKY CATS", ink::TEXT, &lv_font_montserrat_30);
   lv_obj_set_style_text_letter_space(h1, 1, LV_PART_MAIN);
   make_caption(root, RX + 2, 70, "V5RC OVERRIDE   2026-27");
 
-  // ---- entry points ----
-  // Four buttons at 32 px with a 4 px gap, which is the most that fits under
-  // the title block without crowding the bottom edge.
   constexpr int BW = 256;
   constexpr int BH = 32;
   constexpr int B0 = 92;
@@ -1960,12 +1620,9 @@ void build_landing(lv_obj_t* scr) {
               &lv_font_montserrat_16);
 
   make_label(root, LX + 20, LY + LOGO_BOX + 6, "LuckyCats  v0.0.1", ink::DIM, &lv_font_montserrat_10);
-  // Filled in by the boot-time port check. Under the badge rather than on the
-  // console, because a missing motor has to be visible without going looking.
+
   g_lbl_health = make_label(root, LX + 20, LY + LOGO_BOX + 20, "", ink::DIM, &lv_font_montserrat_10);
 
-  // Blackout, tucked in the corner. Deliberately unlabelled and low contrast:
-  // it is for the team, and an obvious "HIDE ROUTE" button is itself a tell.
   lv_obj_t* lock = make_button(root, 442, 6, 30, 22, LV_SYMBOL_EYE_CLOSE, blackout_enter_cb, 0, ink::CARD,
                                &lv_font_montserrat_12);
   lv_obj_set_style_border_color(lock, lv_color_hex(ink::CARD), LV_PART_MAIN);
@@ -1983,9 +1640,7 @@ void build_select(lv_obj_t* scr) {
   g_dd_alliance = make_dropdown(card, 0, 44, COL_W, "Red\nBlue", alliance_cb);
 
   make_caption(card, 2, 80, "ROUTE");
-  // Estimate lives on the caption row, not down with the step readout: it has
-  // to be readable while the preview is mid-route, and the readout line is
-  // busy naming the step that is currently running.
+
   g_lbl_est = make_label(card, 84, 80, "", ink::DIM, &lv_font_montserrat_10);
   lv_obj_set_width(g_lbl_est, COL_W - 84);
   lv_obj_set_style_text_align(g_lbl_est, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
@@ -2082,8 +1737,6 @@ void build_live(lv_obj_t* scr) {
               &lv_font_montserrat_12);
 }
 
-/// Debug console. Full width rather than the usual left-hand card: log lines
-/// are long, and wrapping them at 204 px would make the timestamps useless.
 void build_console(lv_obj_t* scr) {
   lv_obj_t* root = make_root(scr);
   g_root[static_cast<int>(View::CONSOLE)] = root;
@@ -2119,24 +1772,13 @@ void build_console(lv_obj_t* scr) {
   lv_obj_set_style_text_line_space(g_lbl_log, 2, LV_PART_MAIN);
 }
 
-// ---------------------------------------------------------------------------
-// Startup sequence
-//
-// Runs off the existing frame timer rather than blocking. That is not a style
-// choice: init() is called from initialize(), and initialize() blocks every
-// competition mode -- a sleep here would delay autonomous starting.
-//
-// Any touch skips to the end, and autonomous() starting kills it outright.
-// ---------------------------------------------------------------------------
+constexpr uint32_t I_SLIT = 420;
+constexpr uint32_t I_OPEN = 980;
+constexpr uint32_t I_TITLE = 1560;
+constexpr uint32_t I_SUB = 2040;
+constexpr uint32_t I_HOLD = 2500;
+constexpr uint32_t I_END = 2820;
 
-constexpr uint32_t I_SLIT = 420;   // hairline grows out of nothing
-constexpr uint32_t I_OPEN = 980;   // it parts, logo pushes through
-constexpr uint32_t I_TITLE = 1560; // wordmark
-constexpr uint32_t I_SUB = 2040;   // subtitle and rule
-constexpr uint32_t I_HOLD = 2500;  // beat
-constexpr uint32_t I_END = 2820;   // faded out
-
-/// Progress through [a, b) as 0..1, clamped outside it.
 float seg(uint32_t t, uint32_t a, uint32_t b) {
   if (t <= a) return 0.0f;
   if (t >= b) return 1.0f;
@@ -2163,11 +1805,9 @@ void intro_tick() {
     return;
   }
 
-  // 1. a hairline opens out of the centre
   const float grow = ease(seg(t, 0, I_SLIT));
   const int half = static_cast<int>(6.0f + grow * 168.0f);
 
-  // 2. it splits apart vertically, uncovering the badge
   const float part = ease(seg(t, I_SLIT, I_OPEN));
   const int spread = static_cast<int>(part * 62.0f);
   const lv_opa_t bar_opa = static_cast<lv_opa_t>(255.0f * (1.0f - part * 0.75f));
@@ -2181,23 +1821,19 @@ void intro_tick() {
     lv_obj_set_style_bg_color(bar, lv_color_hex(mix(ink::ACCENT, ink::VIOLET, part)), LV_PART_MAIN);
   }
 
-  // 3. the badge scales up to full size as it fades in
   const float rise = ease(seg(t, I_SLIT + 120, I_OPEN + 160));
   lv_image_set_scale(g_intro_logo, static_cast<uint32_t>(168.0f + rise * 88.0f));
   lv_obj_set_style_opa_layered(g_intro_logo, static_cast<lv_opa_t>(rise * 255.0f), LV_PART_MAIN);
 
-  // 4. wordmark, tracking out as it arrives
   const float tt = ease(seg(t, I_OPEN, I_TITLE));
   lv_obj_set_style_text_opa(g_intro_title, static_cast<lv_opa_t>(tt * 255.0f), LV_PART_MAIN);
   lv_obj_set_style_text_letter_space(g_intro_title, static_cast<int32_t>(10.0f - tt * 8.0f), LV_PART_MAIN);
 
-  // 5. rule sweeps out, subtitle follows
   const float st = ease(seg(t, I_TITLE, I_SUB));
   lv_obj_set_size(g_intro_rule, static_cast<int32_t>(st * 232.0f), 1);
   lv_obj_align(g_intro_rule, LV_ALIGN_CENTER, 0, 71);
   lv_obj_set_style_text_opa(g_intro_sub, static_cast<lv_opa_t>(st * 255.0f), LV_PART_MAIN);
 
-  // 6. hand over
   const float out = seg(t, I_HOLD, I_END);
   lv_obj_set_style_opa_layered(g_intro, static_cast<lv_opa_t>(255.0f * (1.0f - out)), LV_PART_MAIN);
 }
@@ -2208,7 +1844,7 @@ void intro_start() {
   g_intro_t = 0;
   lv_obj_remove_flag(g_intro, LV_OBJ_FLAG_HIDDEN);
   lv_obj_set_style_opa_layered(g_intro, LV_OPA_COVER, LV_PART_MAIN);
-  set_view(g_view); // hides the views underneath
+  set_view(g_view);
   intro_tick();
 }
 
@@ -2255,17 +1891,6 @@ void build_intro(lv_obj_t* scr) {
   lv_obj_add_flag(g_intro, LV_OBJ_FLAG_HIDDEN);
 }
 
-// ---------------------------------------------------------------------------
-// Blackout
-//
-// Shows a plausible just-booted screen instead of the selection. It must look
-// idle rather than deliberately hidden -- a black rectangle advertises that
-// there is something worth hiding.
-//
-// Held down on the badge to leave, so a curious hand cannot get out of it by
-// prodding the screen.
-// ---------------------------------------------------------------------------
-
 void apply_blackout() {
   if (g_black == nullptr) return;
   if (g_blackout && !g_intro_active) lv_obj_remove_flag(g_black, LV_OBJ_FLAG_HIDDEN);
@@ -2277,7 +1902,7 @@ void blackout_enter_cb(lv_event_t*) {
   g_blackout = true;
   g_robot_selected = false;
   apply_blackout();
-  save_now(); // immediately, not debounced: this one must survive a yank
+  save_now();
 }
 
 void blackout_exit_cb(lv_event_t*) {
@@ -2290,7 +1915,7 @@ void build_blackout(lv_obj_t* scr) {
   g_black = make_root(scr);
   lv_obj_set_style_bg_color(g_black, lv_color_hex(ink::BG), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(g_black, LV_OPA_COVER, LV_PART_MAIN);
-  lv_obj_add_flag(g_black, LV_OBJ_FLAG_CLICKABLE); // swallow stray taps
+  lv_obj_add_flag(g_black, LV_OBJ_FLAG_CLICKABLE);
 
   lv_obj_t* img = lv_image_create(g_black);
   lv_image_set_src(img, &logo_img);
@@ -2304,10 +1929,6 @@ void build_blackout(lv_obj_t* scr) {
 
   g_black_hint = make_label(g_black, 216, 146, "standby", ink::DIM, &lv_font_montserrat_14);
 
-  // Unhide, in the same corner as the eye icon that turned blackout on, so the
-  // two read as one switch. Low contrast on purpose: it has to be findable by
-  // someone who knows it is there without advertising that anything is hidden.
-  // Holding the badge still works as well, for when the corner is smudged.
   lv_obj_t* unhide = make_button(g_black, 442, 6, 30, 22, LV_SYMBOL_EYE_OPEN, blackout_exit_cb, 0, ink::CARD,
                                  &lv_font_montserrat_12);
   lv_obj_set_style_border_color(unhide, lv_color_hex(ink::CARD), LV_PART_MAIN);
@@ -2315,13 +1936,7 @@ void build_blackout(lv_obj_t* scr) {
   lv_obj_add_flag(g_black, LV_OBJ_FLAG_HIDDEN);
 }
 
-/// The pose readout that floats over the bottom of the field. Parented to the
-/// screen rather than to a view root, because it belongs to the canvas and the
-/// canvas outlives every view.
 void build_hud(lv_obj_t* scr) {
-  // Corner block, not a full-width bar. The Toggles sit at the centre of each
-  // wall and are now the quadrant picker, so anything spanning the width of the
-  // field buries the south one.
   constexpr int W = 100;
   constexpr int H = 54;
   g_hud = lv_obj_create(scr);
@@ -2334,7 +1949,7 @@ void build_hud(lv_obj_t* scr) {
   lv_obj_set_style_radius(g_hud, 8, LV_PART_MAIN);
   lv_obj_set_style_pad_all(g_hud, 0, LV_PART_MAIN);
   lv_obj_remove_flag(g_hud, LV_OBJ_FLAG_SCROLLABLE);
-  // must not eat touches -- the field underneath is the primary control
+
   lv_obj_remove_flag(g_hud, LV_OBJ_FLAG_CLICKABLE);
 
   g_hud_stripe = lv_obj_create(g_hud);
@@ -2353,29 +1968,9 @@ void build_hud(lv_obj_t* scr) {
   g_hud_h = make_label(g_hud, VAL, 35, "0", ink::ACCENT, &lv_font_montserrat_14);
 }
 
-// ---------------------------------------------------------------------------
-// Boot-time device check
-//
-// Two separate questions, and the more useful one needs no hardware at all:
-//
-//   1. Does any port appear twice? That is a code bug, not a wiring fault, and
-//      it is the one that cost us a match's worth of debugging: port 7 was
-//      listed as a lift motor while it was really on the left drivetrain, so
-//      opcontrol braked it forty times a second while the chassis drove it and
-//      the left side lost most of its power. It tested fine on its own.
-//      This check runs everywhere, simulator included.
-//
-//   2. Is anything missing or the wrong device type? Needs a real brain, so it
-//      is skipped in the simulator rather than faked.
-//
-// Ports come from the objects themselves, never from a hand-written list, so
-// this cannot be fooled by a table that has drifted out of date.
-// ---------------------------------------------------------------------------
-
-/// Every smart port the robot claims, with the subsystem that claims it.
 struct PortUse {
   const char* owner;
-  int port; // 1-21, sign stripped
+  int port;
 };
 
 int collect_ports(PortUse* out, int max_n) {
@@ -2411,7 +2006,6 @@ void device_check() {
   PortUse used[MAX_PORTS];
   const int n = collect_ports(used, MAX_PORTS);
 
-  // ---- conflicts: pure data, so this runs on the brain and in the simulator
   int conflicts = 0;
   for (int i = 0; i < n; ++i) {
     for (int j = i + 1; j < n; ++j) {
@@ -2428,13 +2022,11 @@ void device_check() {
       lv_label_set_text(g_lbl_health, msg);
       lv_obj_set_style_text_color(g_lbl_health, lv_color_hex(ink::RED), LV_PART_MAIN);
     }
-    return; // a conflict makes the presence check below meaningless
+    return;
   }
 
 #ifdef LUCKYCATS_SIM
-  // No smart ports on a PC. Saying so beats a green "all present" that means
-  // nothing -- but the conflict check above did run, and that is the half that
-  // catches code bugs rather than loose cables.
+
   logf("%d ports, no conflicts; presence check needs a brain", n);
   if (g_lbl_health != nullptr) {
     lv_label_set_text(g_lbl_health, "simulated hardware");
@@ -2475,12 +2067,7 @@ void device_check() {
   }
 #endif
 }
-
-} // namespace
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
+}
 
 void init() {
   lv_obj_t* scr = lv_screen_active();
@@ -2488,16 +2075,11 @@ void init() {
   lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-  // Both before any widget exists: the route dropdown is built from the names
-  // in AUTONS, and it should come up already showing what was chosen last time
-  // rather than flickering to it afterwards.
   build_route_options();
   load_saved();
-  // An empty AUTONS, or a saved index pointing past a route that has since been
-  // deleted, both land on Custom rather than reading off the end of the table.
+
   if (g_selected < 0 || g_selected > AUTON_COUNT) g_selected = custom_sel();
 
-  // ---- field preview, shared by every view except the landing page ----
   g_canvas = lv_canvas_create(scr);
   lv_canvas_set_buffer(g_canvas, g_canvas_buf, field::PX, field::PX, LV_COLOR_FORMAT_ARGB8888);
   lv_obj_set_pos(g_canvas, FIELD_X, FIELD_Y);
@@ -2515,8 +2097,7 @@ void init() {
   build_blackout(scr);
   build_intro(scr);
 
-  // Reflect the restored selection in the controls.
-  lv_dropdown_set_selected(g_dd_alliance, g_alliance == field::Alliance::BLUE ? 1u : 0u);
+  lv_dropdown_set_selected(g_dd_alliance, color == field::Alliance::BLUE ? 1u : 0u);
   lv_dropdown_set_selected(g_dd_route, static_cast<uint32_t>(g_selected));
   lv_dropdown_set_selected(g_dd_start, static_cast<uint32_t>(g_start_sel));
 
@@ -2532,8 +2113,6 @@ void init() {
   logf("battery %.0f%%", pros::battery::get_capacity());
   update_console();
 
-  // Must be an lv_timer, not a pros::Task: LVGL is serviced by its own daemon
-  // and touching widgets from another task races with it.
   lv_timer_create(anim_cb, FRAME_MS, nullptr);
 }
 
@@ -2543,7 +2122,7 @@ bool custom_selected() { return g_selected >= AUTON_COUNT; }
 
 const char* selected_name() { return route_name(g_selected); }
 
-field::Alliance alliance() { return g_alliance; }
+field::Alliance alliance() { return color; }
 
 void show_live() { g_req_live = true; }
 
@@ -2552,12 +2131,9 @@ void toggle_record() { g_req_rec_toggle = true; }
 bool recording() { return g_recording; }
 
 void logf(const char* fmt, ...) {
-  const uint32_t head = g_log_head; // read once; ++ on a volatile is deprecated
+  const uint32_t head = g_log_head;
   char* dst = g_log[head % LOG_LINES];
 
-  // Timestamps are relative to program start, which is what matters when the
-  // question is "how long did that leg take", and they are what makes the
-  // console readable at a glance.
   const uint32_t ms = pros::millis();
   int p = std::snprintf(dst, LOG_COLS, "%3lu.%03lu  ", static_cast<unsigned long>(ms / 1000),
                         static_cast<unsigned long>(ms % 1000));
@@ -2570,33 +2146,15 @@ void logf(const char* fmt, ...) {
   }
   dst[LOG_COLS - 1] = '\0';
 
-  // Also out the wire, so `pros terminal` gets the full history rather than the
-  // last 64 lines the ring happens to be holding.
   std::printf("%s\n", dst);
 
-  // Published last: a reader that samples head between these two statements
-  // sees the previous line, never a half-written one.
   g_log_head = head + 1;
 }
 
 void log_clear() {
   g_log_head = 0;
-  g_log_shown = 1; // force update_console to notice and repaint the empty state
+  g_log_shown = 1;
 }
-
-// ---------------------------------------------------------------------------
-// Motion timeouts
-//
-// These were fixed at 3000 / 2000 / 4000 ms regardless of how far the robot had
-// to go. A LemLib motion that hits its timeout gives up silently and the route
-// carries on from wherever it stopped, so a long move across the field was
-// being abandoned halfway with nothing on screen to say so.
-//
-// Scaled with the distance and angle instead, with a floor for settling time
-// and a ceiling so a route can never hang past the period. The numbers are
-// deliberately generous: a timeout should be a backstop against something being
-// stuck, not a speed limit.
-// ---------------------------------------------------------------------------
 
 constexpr uint32_t MOVE_FLOOR_MS = 900;
 constexpr uint32_t MOVE_CEIL_MS = 6000;
@@ -2607,15 +2165,10 @@ uint32_t clamp_timeout(float ms) {
   return static_cast<uint32_t>(ms);
 }
 
-/// ~55 ms per inch, which is about three times the modelled drive rate.
 uint32_t drive_timeout(float inches) { return clamp_timeout(std::fabs(inches) * 55.0f + 600.0f); }
 
-/// ~9 ms per degree, on the same generous basis.
 uint32_t turn_timeout(float degrees) { return clamp_timeout(std::fabs(degrees) * 9.0f + 500.0f); }
 
-/// Everything both paths do on the way out: stop the manipulator, record the
-/// duration and drop the active flag. Duplicated in two places before, which is
-/// how the compiled path ended up not stopping the intake on a cancel.
 void finish_run(uint32_t t0) {
   intake.move(0);
   claw_spin.move(0);
@@ -2629,10 +2182,8 @@ void finish_run(uint32_t t0) {
 void run_selected() {
   g_auton_active = true;
   g_cancel = false;
-  show_live(); // the trail on this view is the record of what actually happened
-  // Cleared through a request flag, not written directly: this runs on the
-  // autonomous task and g_trail_n belongs to the UI task, which is the exact
-  // race the other cross-task requests in this file exist to avoid.
+  show_live();
+
   g_req_trail_clear = true;
 
   float sx, sy, sth;
@@ -2644,23 +2195,18 @@ void run_selected() {
   logf("start X %.1f Y %.1f H %.0f", static_cast<double>(sx), static_cast<double>(sy),
        static_cast<double>(sth));
 
-  // A compiled routine is just a function call. Everything below it is the
-  // interpreter for the hand-built route, which is the only thing that has
-  // steps.
   if (!is_custom()) {
     const AutonFn fn = AUTONS[g_selected].run;
     if (fn != nullptr) fn();
     else logf("routine is null");
 
-    chassis.waitUntilDone(); // in case the routine left a motion running
+    chassis.waitUntilDone();
     finish_run(t0);
     return;
   }
 
   const int n = step_count();
   for (int i = 0; i < n; ++i) {
-    // Between steps, not inside one: a LemLib motion called with false is
-    // already blocking by the time anything could ask it to stop.
     if (g_cancel) {
       logf("stopped by request at step %d/%d", i + 1, n);
       break;
@@ -2668,63 +2214,60 @@ void run_selected() {
     const Step s = step_at(i);
     switch (s.kind) {
       case Kind::DRIVE: {
-        const lemlib::Pose p = chassis.getPose();
+         const lemlib::Pose p = chassis.getPose();
         const float t = static_cast<float>(p.theta) * PI_F / 180.0f;
-        lemlib::MoveToPointParams mp;
+            lemlib::MoveToPointParams mp;
         mp.forwards = (s.a >= 0);
         chassis.moveToPoint(p.x + std::sin(t) * s.a, p.y + std::cos(t) * s.a, drive_timeout(s.a), mp,
                             false);
         break;
       }
       case Kind::TURN: {
-        const lemlib::Pose p = chassis.getPose();
-        const float d = wrap180(s.a - static_cast<float>(p.theta));
+         const lemlib::Pose p = chassis.getPose();
+             const float d = wrap180(s.a - static_cast<float>(p.theta));
         chassis.turnToHeading(s.a, turn_timeout(d), lemlib::TurnToHeadingParams{}, false);
         break;
-      }
+       }
       case Kind::GOTO: {
-        const lemlib::Pose p = chassis.getPose();
+          const lemlib::Pose p = chassis.getPose();
+
         const float px = static_cast<float>(p.x), py = static_cast<float>(p.y);
-        const float bear = bearing_to(px, py, s.a, s.b);
+           const float bear = bearing_to(px, py, s.a, s.b);
+
         const float dist = std::sqrt((s.a - px) * (s.a - px) + (s.b - py) * (s.b - py));
-        const float d = wrap180(bear - static_cast<float>(p.theta));
+         const float d = wrap180(bear - static_cast<float>(p.theta));
         if (s.flag & F_SWERVE) {
-          // one boomerang motion: the robot arcs in and settles on the bearing
           chassis.moveToPose(s.a, s.b, bear, drive_timeout(dist) + turn_timeout(d),
                              lemlib::MoveToPoseParams{}, false);
         } else {
-          // default: square up to the point first, then drive straight at it
-          chassis.turnToHeading(bear, turn_timeout(d), lemlib::TurnToHeadingParams{}, false);
+            chassis.turnToHeading(bear, turn_timeout(d), lemlib::TurnToHeadingParams{}, false);
           chassis.moveToPoint(s.a, s.b, drive_timeout(dist), lemlib::MoveToPointParams{}, false);
         }
         break;
       }
       case Kind::INTAKE:
         intake.move(static_cast<int>(s.a) * 127);
-        claw_spin.move(static_cast<int>(s.a) * 127);
+         claw_spin.move(static_cast<int>(s.a) * 127);
         break;
       case Kind::LIFT:
-        // The claw pivot is not touched here -- the background task started in
-        // initialize() follows the lift on its own.
+
         lift.move_absolute(s.a * LIFT_TICKS, 100);
         break;
-      case Kind::WAIT:
+       case Kind::WAIT:
         pros::delay(static_cast<uint32_t>(s.a));
         break;
       case Kind::SCORE:
-        // Front-to-back: the lift goes up, the rollers run backwards to push
-        // the load out of the rear, then the lift returns to travel height. The
-        // robot is already backed into the Goal by the DRIVE before this.
-        lift.move_absolute(s.a * LIFT_TICKS, 100);
+
+           lift.move_absolute(s.a * LIFT_TICKS, 100);
         pros::delay(SCORE_RAISE_MS);
-        intake.move(-127);
+               intake.move(-127);
         claw_spin.move(-127);
         pros::delay(SCORE_EJECT_MS);
-        intake.move(0);
+              intake.move(0);
         claw_spin.move(0);
         lift.move_absolute(LIFT_TRAVEL * LIFT_TICKS, 100);
-        break;
-      // Nothing here moves the claw -- no step can.
+            break;
+
     }
     chassis.waitUntilDone();
     logf("%2d/%d  %s", i + 1, n, step_desc(s));
@@ -2733,41 +2276,51 @@ void run_selected() {
   finish_run(t0);
 }
 
-// ---------------------------------------------------------------------------
-// Starting a route from the screen
-// ---------------------------------------------------------------------------
+// When the field ends autonomous it kills the task running autonomous(), but
+// nothing tells LemLib: the chassis task keeps driving the motion it was given,
+// and g_auton_active is never cleared because finish_run() was never reached.
+// Both leak into the driver period. Call this on the way into opcontrol.
+void abort() {
+  chassis.cancelAllMotions();
+
+  intake.move(0);
+  claw_spin.move(0);
+  claw_pivot.move(0);
+  lift.brake();
+
+  if (g_auton_active) logf("auton cut short by field");
+  g_auton_active = false;
+  g_cancel = false;
+}
 
 bool request_run() {
   if (g_auton_active) {
     logf("already running");
     return false;
   }
-  // A touchscreen button must never be able to drive the robot at an event.
-  // Under field control the only thing that starts autonomous is the field.
-  if (pros::competition::is_connected()) {
+
+    // A touchscreen button must never drive the robot at an event. Under field
+    // control the only thing that starts autonomous is the field.
+    if (pros::competition::is_connected()) {
     logf("refused: under competition control");
     return false;
   }
 
   g_cancel = false;
-  // Held in a static so the handle outlives this function. The task itself
-  // keeps running either way -- PROS's Task destructor does not kill it -- but
-  // a dangling handle is not worth the argument.
+
   static pros::Task* runner = nullptr;
-  delete runner;
-  runner = new pros::Task([] { run_selected(); }, "auton_screen");
+    delete runner;
+          runner = new pros::Task([] { run_selected(); }, "auton_screen");
   return true;
 }
 
 void request_stop() {
-  if (!g_auton_active) return;
+    if (!g_auton_active) return;
   g_cancel = true;
-  // Drop whatever motion is in flight as well, so the robot stops now rather
-  // than finishing the leg it is on before noticing.
+
   chassis.cancelAllMotions();
-  logf("stop requested");
+    logf("stop requested");
 }
 
 bool running() { return g_auton_active; }
-
-} // namespace auton
+}

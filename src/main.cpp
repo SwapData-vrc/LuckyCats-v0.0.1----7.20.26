@@ -1,138 +1,93 @@
 
-
 #include "main.h"
 #include "auton_selector.hpp" // IWYU pragma: keep
 #include "lemlib/api.hpp"     // IWYU pragma: keep
+#include "pros/rtos.hpp"
 #include "subsystems.hpp"     // IWYU pragma: keep
 
-// Which of spinclaw's three positions the claw is on. B steps through them.
 int claw_position = 0;
+bool lift_full_extend = true;
+bool lift_full_descent = true;
+double optical_hue = 0.0;
+double optical_distance = 0.0;
 
-/**
- * Runs initialization code. This occurs as soon as the program is started.
- *
- * All other competition modes are blocked by initialize; it is recommended
- * to keep execution time for this mode under a few seconds.
- *
- * Note: LLEMU (pros::lcd) is deliberately not used anywhere in this project.
- * The auton selector owns the LVGL screen, and LLEMU would build a competing
- * one on top of it.
- */
+// Sticks do not always return to exactly zero. Without this the robot creeps
+// across the tile with nobody touching the controller.
+constexpr int DRIVE_DEADBAND = 5;
+
 void initialize() {
-  chassis.calibrate(); // calibrate sensors
+  chassis.calibrate();
 
-  // Zero the lift and the claw pivot where they are sitting right now.
-  // spinclaw's positions are all measured from this zero, so the robot has to
-  // be powered on with the lift down and the claw pointing down. Without this
-  // tare, "position 0 is down" would be a hope rather than a fact.
+  // spinclaw's positions are measured from here, so the robot must be powered
+  // on with the lift down and the claw pointing down.
   lift.tare_position();
   claw_pivot.tare_position();
 
-  auton::init(); // touchscreen route selector + field preview
+  auton::init();
 }
 
-/**
- * Runs while the robot is in the disabled state of Field Management System or
- * the VEX Competition Switch, following either autonomous or opcontrol. When
- * the robot is enabled, this task will exit.
- */
-void disabled() {}
+void disabled() { auton::abort(); }
 
-/**
- * Runs after initialize(), and before autonomous when connected to the Field
- * Management System or the VEX Competition Switch. This is intended for
- * competition-specific initialization routines, such as an autonomous selector
- * on the LCD.
- *
- * This task will exit when the robot is enabled and autonomous or opcontrol
- * starts.
- */
 void competition_initialize() {}
 
-/**
- * Runs the user autonomous code. This function will be started in its own task
- * with the default priority and stack size whenever the robot is enabled via
- * the Field Management System or the VEX Competition Switch in the autonomous
- * mode. Alternatively, this function may be called in initialize or opcontrol
- * for non-competition testing purposes.
- *
- * If the robot is disabled or communications is lost, the autonomous task
- * will be stopped. Re-enabling the robot will restart the task, not re-start it
- * from where it left off.
- */
-/// Drives whichever route is selected on the brain. The routes themselves are
-/// in src/autons.cpp -- there is nothing to change here to add one.
 void autonomous() { auton::run_selected(); }
 
-/**
- * Runs the operator control code. This function will be started in its own task
- * with the default priority and stack size whenever the robot is enabled via
- * the Field Management System or the VEX Competition Switch in the operator
- * control mode.
- *
- * If no competition control is connected, this function will run immediately
- * following initialize().
- *
- * If the robot is disabled or communications is lost, the
- * operator control task will be stopped. Re-enabling the robot will restart the
- * task, not resume it from where it left off.
- */
 void opcontrol() {
   pros::Controller master(pros::E_CONTROLLER_MASTER);
 
-  // The claw pivot is NOT re-zeroed here. initialize() already tared it, and
-  // zeroing it again at the top of opcontrol would move the goalposts: in a
-  // match opcontrol starts after autonomous, so "position 0" would quietly
-  // become wherever the claw happened to end up rather than where it started.
+  // The field kills the autonomous task, but LemLib's chassis task does not
+  // know that and will keep driving its last motion into the driver period,
+  // fighting the sticks. Nothing below can override it -- it has to be cancelled.
+  auton::abort();
+
+  // Do NOT re-zero claw_pivot here. In a match opcontrol runs after autonomous,
+  // so that would make "position 0" wherever the claw ended up.
   //
-  // Hold, not coast: a cascade lift on coast sinks under its own weight the
-  // moment the stick is released, and a claw that drifts open drops its load.
+  // Hold, not coast: the lift sinks under its own weight on coast.
   lift.set_brake_mode(pros::MotorBrake::hold);
   claw_pivot.set_brake_mode(pros::MotorBrake::hold);
   intake.set_brake_mode(pros::MotorBrake::coast);
   claw_spin.set_brake_mode(pros::MotorBrake::coast);
 
   while (true) {
-    // arcade control scheme
-
-    // get left y and right x positions
     int leftY = master.get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y);
     int rightX = master.get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_X);
+    optical_hue = optical_sensor.get_hue();
+    optical_distance = optical_sensor.get_proximity();
 
-    // move the robot
+    if (leftY > -DRIVE_DEADBAND && leftY < DRIVE_DEADBAND) leftY = 0;
+    if (rightX > -DRIVE_DEADBAND && rightX < DRIVE_DEADBAND) rightX = 0;
+
     chassis.arcade(leftY, rightX);
 
-    // ---- manipulator -------------------------------------------------------
-    // TODO: confirm these mappings with whoever is driving. The ports they act
-    // on are still placeholders -- see src/subsystems.cpp.
-
-
-    // B steps the claw to its next position and wraps back round at the end:
-    // start -> 360 -> 450 -> start.
-    //
-    // The wrap has to happen HERE, not inside spinclaw. spinclaw takes its
-    // argument by value, so setting `position = 0` in there changes only
-    // spinclaw's own copy and claw_position keeps climbing -- 3, 4, 5 -- until
-    // no branch matches and the claw stops responding.
     if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_B)) {
       claw_position = claw_position + 1;
       if (claw_position > 2) claw_position = 0;
       spinclaw(claw_position);
     }
 
-    // Switches the claw motor off once it gets where it was sent. Without this
-    // the motor holds against its target forever and creaks.
     claw_update();
-    // R1 / R2: intake in / out. The intake is on the front, scoring is off the
-    // back, so "out" is what pushes a load into a Goal.
+
+     if(lift.get_position() > 2026) {
+     lift_full_extend = true;
+    } else {
+      lift_full_extend = false;
+    }
+
+    if(lift.get_position() < -100) {
+            lift_full_descent = true;
+    } else {
+      lift_full_descent = false;
+    }
+
     if (master.get_digital(pros::E_CONTROLLER_DIGITAL_R1)) {
-      intake.move(127);
-      claw_spin.move(127);
+      intake.move(100);
+      claw_spin.move(-50);
     }
 
     else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_R2)) {
-      intake.move(-127);
-      claw_spin.move(-127);
+      intake.move(-100);
+         claw_spin.move(50);
     }
 
     else {
@@ -140,23 +95,55 @@ void opcontrol() {
       claw_spin.move(0);
     }
 
-    // L1 / L2: lift up / down. Held rather than latched, so letting go stops it
-    // where it is rather than running it into a hard stop.
-    if (master.get_digital(pros::E_CONTROLLER_DIGITAL_L1))
+    if (master.get_digital(pros::E_CONTROLLER_DIGITAL_L1)  && lift_full_extend == false)
       lift.move(110);
-    else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_L2))
+    else if (master.get_digital(pros::E_CONTROLLER_DIGITAL_L2) && lift_full_descent == false)
       lift.move(-90);
     else
       lift.brake();
 
-    // A toggles route recording: drive the route by hand, press A again, and
-    // the driven path lands in the Custom slot as GOTO steps.
-    if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_A)) {
+    // Route recorder. A practice-field tool, so it is dead at an event -- a
+    // mis-pressed A must not start writing routes mid-match.
+    if (master.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_A) &&
+        !pros::competition::is_connected()) {
       auton::toggle_record();
       master.rumble(auton::recording() ? "." : "..");
     }
 
-    // delay to save resources
+   /* if(optical_hue < 30 || optical_hue > 330 && color == field::Alliance::RED ) {
+      
+        claw_spin.move(-50);
+
+    lift.move_absolute(360, 100);
+    pros::delay(700);
+    claw_spin.move(0);
+    }
+    else if(optical_hue < 280 && optical_hue >  160 && color == field::Alliance::BLUE) {
+      
+       claw_spin.move(-50);
+    lift.move_absolute(-20, 100);
+    pros::delay(700);
+      claw_pivot.move_absolute(-400, 1000);
+    claw_spin.move(0); 
+    }
+    else if(optical_hue < 90 && optical_hue >  30) {
+
+     claw_spin.move(-50);
+     claw_pivot.move_absolute(-925, 1000);
+    lift.move_absolute(-20, 100);
+       claw_pivot.move_absolute(-400, 1000);
+    pros::delay(700);
+    claw_spin.move(0);
+
+    }
+    else {
+      pros::delay(1);
+    }
+
+    */
+
+    // Required. Without it this loop never yields and the selector's LVGL task
+    // and the competition task are starved.
     pros::delay(25);
   }
 }

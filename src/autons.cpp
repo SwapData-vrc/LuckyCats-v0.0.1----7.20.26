@@ -2,7 +2,7 @@
 #include "autons.hpp"
 
 #include "auton_selector.hpp"
-#include "field.hpp"
+#include "field.hpp" 
 #include "subsystems.hpp"
 
 #include <cmath>
@@ -88,14 +88,30 @@ void do_nothing() {
 
 
 
+}  // anonymous namespace — everything above is private to this file.
+
+/* AUTONS and AUTON_COUNT must be defined here, directly in `auton`, and NOT
+   inside the anonymous namespace above.
+   autons.hpp declares them `extern`, i.e. external linkage. Anything defined
+   in an anonymous namespace gets *internal* linkage, so those definitions are
+   a different entity entirely and never satisfy the declarations — which is
+   why auton_selector.cpp failed with "undefined reference to auton::AUTONS".
+   Keep the closing brace above ahead of these definitions. */
 const Auton AUTONS[] = {
-   {"null", do_nothing, -0.0f, 0.0f, 90.0f},
+    {"null", do_nothing, -0.0f, 0.0f, 90.0f},
     {"-RedToggle", red_toggle, -52.0f, 0.0f, 90.0f},
     {"-BlueToggle", blue_toggle, -52.0f, 0.0f, 0.0f},
 };
 
 const int AUTON_COUNT = static_cast<int>(sizeof(AUTONS) / sizeof(AUTONS[0]));
 
-static_assert(AUTON_COUNT <= MAX_AUTONS, "too many routines for the dropdown buffer");
-}
-}
+/* Asserted on the sizeof expression, not on AUTON_COUNT. AUTON_COUNT is
+   declared `extern` in the header, and GCC will not always accept an
+   extern-declared const as a constant expression here — that is the
+   "'auton::AUTON_COUNT' was not initialized with a constant expression" error
+   your teammate hit. sizeof on the array immediately above is a constant
+   expression on every toolchain, so this builds the same everywhere. */
+static_assert(sizeof(AUTONS) / sizeof(AUTONS[0]) <= MAX_AUTONS,
+              "too many routines for the dropdown buffer");
+
+}  // namespace auton
